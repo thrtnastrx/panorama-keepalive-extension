@@ -12,6 +12,7 @@ const recognizeFwEl = document.getElementById("recognize-fw");
 const hostsEl = document.getElementById("hosts");
 const emptyEl = document.getElementById("empty");
 const statusEl = document.getElementById("status");
+const scanEl = document.getElementById("scan");
 const pingEl = document.getElementById("ping");
 const optionsEl = document.getElementById("options");
 const progressEl = document.getElementById("progress");
@@ -19,6 +20,13 @@ const progressBarEl = document.getElementById("progress-bar");
 const progressLabelEl = document.getElementById("progress-label");
 
 let lastState = null;
+
+function showRecognizeHints(hints) {
+  const blocked = (hints || []).filter((h) => h && h.ok === false && h.host);
+  if (!blocked.length) return;
+  const lines = blocked.slice(0, 4).map((h) => `${h.host}: ${h.reason}`);
+  showError(lines.join(" · "));
+}
 
 function send(message) {
   return new Promise((resolve, reject) => {
@@ -270,6 +278,32 @@ async function load() {
     }
   }
   render(res.state);
+  showRecognizeHints(res.recognizeHints);
+}
+
+async function scanOpenTabs() {
+  showError("");
+  let res = await send({ type: "get-state" });
+  if (!res?.ok) throw new Error(res?.error || "Could not read state");
+  const needed = Array.isArray(res.needHostPermissions) ? res.needHostPermissions : [];
+  if (needed.length) {
+    const granted = await requestHostPermissions(needed);
+    if (!granted) {
+      showError("Allow access to the open firewall/Panorama tab(s), then Scan tabs again");
+      showRecognizeHints(res.recognizeHints);
+      return;
+    }
+  }
+  res = await send({ type: "rescan-pan-firewall" });
+  if (!res?.ok) throw new Error(res?.error || "Could not rescan tabs");
+  if (res.needHostPermissions?.length) {
+    await requestHostPermissions(res.needHostPermissions);
+    res = await send({ type: "rescan-pan-firewall" });
+  }
+  render(res.state);
+  const stillBlocked = (res.recognizeHints || []).filter((h) => h && h.ok === false && h.host);
+  if (stillBlocked.length) showRecognizeHints(res.recognizeHints);
+  else showError("");
 }
 
 async function saveAlias(host, alias) {
@@ -401,6 +435,19 @@ recognizeFwEl.addEventListener("change", () => {
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== "ping-progress") return;
   setProgress(message);
+});
+
+scanEl.addEventListener("click", () => {
+  void (async () => {
+    scanEl.disabled = true;
+    try {
+      await scanOpenTabs();
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err));
+    } finally {
+      scanEl.disabled = false;
+    }
+  })();
 });
 
 pingEl.addEventListener("click", () => {
