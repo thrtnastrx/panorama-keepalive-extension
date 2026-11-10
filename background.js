@@ -182,11 +182,23 @@ function isPermanentHost(state, host) {
   return parseHostList(state.hostsText).includes(normalizeHost(host));
 }
 
-async function hasHostPermissions(hosts) {
+/** True only when each host origin is granted (needed for scripting IP tabs in Firefox). */
+async function hasSpecificHostPermissions(hosts) {
   const origins = hosts.map(originForHost).filter(Boolean);
   if (!origins.length) return false;
-  if (await chrome.permissions.contains({ origins })) return true;
-  // Firefox: a granted https://*/* wildcard often fails contains() for a specific host.
+  try {
+    return await chrome.permissions.contains({ origins });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Broad access check: specific host OR the https wildcard optional permission.
+ * Do not use this before executeScript on IP tabs — Firefox often needs the specific origin.
+ */
+async function hasHostPermissions(hosts) {
+  if (await hasSpecificHostPermissions(hosts)) return true;
   try {
     if (await chrome.permissions.contains({ origins: ["https://*/*"] })) return true;
   } catch {
@@ -195,15 +207,31 @@ async function hasHostPermissions(hosts) {
   return false;
 }
 
+async function listRecognizeCandidates() {
+  const state = await storageGet();
+  const out = [];
+  const seen = new Set();
+  try {
+    const tabs = await tabsQuery({});
+    for (const tab of tabs || []) {
+      const host = hostFromTabUrl(tab?.url || "");
+      if (!host || isScmHost(host) || seen.has(host)) continue;
+      if (isPermanentHost(state, host)) continue;
+      seen.add(host);
+      out.push({ host, tabId: tab.id, url: tab.url || "" });
+    }
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
 async function scanOpenTabsForPanFirewall() {
   const state = await storageGet();
   if (!state.recognizePanFirewall) return;
   try {
-    const tabs = await tabsQuery({});
-    for (const tab of tabs || []) {
-      if (tab?.url && tab.id != null) {
-        await maybeRecognizePanFirewallFromTabUrl(tab.url, tab.id);
-      }
+    for (const c of await listRecognizeCandidates()) {
+      if (c.tabId != null) await maybeRecognizePanFirewallFromTabUrl(c.url, c.tabId);
     }
   } catch {
     /* ignore */
@@ -354,10 +382,20 @@ async function pingHost(host) {
   const key = normalizeHost(host);
   if (isScmHost(key)) return pingScmHost(key);
 
-  // Ephemeral firewalls: background GET does not reset PAN-OS admin idle (CLI Idle keeps climbing).
-  // Keep-alive must refresh a management UI document inside a real tab.
-  if (await isEphemeralHost(key)) {
-    return pingEphemeralPanOsHost(key);
+  const ephemeral = await isEphemeralHost(key);
+  // Prefer in-tab keep-alive whenever a UI tab exists (self-signed certs + real Idle reset).
+  const tabPing = await keepAlivePanOsFromTab(key, {
+    createIfMissing: ephemeral,
+    ephemeralHint: ephemeral,
+  });
+  if (tabPing) return tabPing;
+  if (ephemeral) {
+    return {
+      ok: false,
+      host: key,
+      url: `https://${key}/`,
+      reason: "Firewall login expired — sign in again in this browser",
+    };
   }
 
   const paths = ["/", "/php/"];
@@ -386,17 +424,12 @@ async function pingHost(host) {
       fetchFailed = true;
     }
   }
-  // Only fall back to an open tab when extension fetch cannot talk TLS (self-signed, etc.).
-  if (!sawResponse) {
-    const tabPing = await keepAlivePanOsFromTab(key, { createIfMissing: false, ephemeralHint: false });
-    if (tabPing) return tabPing;
-  }
   if (!sawResponse && fetchFailed) {
     return {
       ok: false,
       host: key,
       url: lastUrl || `https://${key}/`,
-      reason: "Failed to fetch — open the host tab (trust the cert) or check host permission",
+      reason: "Failed to fetch — open the host tab (trust the cert) or allow host permission",
     };
   }
   return {
@@ -424,9 +457,10 @@ async function ensurePanOsTab(host) {
 }
 
 /**
- * Runs in the firewall tab MAIN world.
+ * Runs in the firewall/Panorama tab MAIN world.
  * PAN-OS resets admin Idle on management UI activity. X-Frame-Options: DENY blocks
- * iframes, so same-origin fetch from the page is used instead of an iframe.
+ * iframes, so same-origin fetch + light UI nudges from the page are used instead.
+ * Success requires an actual session touch — st0 alone must not count as keep-alive.
  */
 function panOsTabKeepAliveFunc() {
   const url = String(location.href || "");
@@ -438,16 +472,65 @@ function panOsTabKeepAliveFunc() {
   if (path === "/php/login.php" || path === "/php/logout.php") {
     return Promise.resolve({ ok: false, authenticated: false, url, via: "mgmt-path" });
   }
-  const token = window.Pan && window.Pan.st && window.Pan.st.st && window.Pan.st.st.st0;
+  const st = window.Pan && window.Pan.st && window.Pan.st.st;
+  const token = st && st.st0;
   const hasSt0 =
     (typeof token === "string" && token) || /window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(html);
-  if (!hasSt0) {
+  const hash = String(location.hash || "");
+  const hashShell =
+    st &&
+    typeof st === "object" &&
+    hash &&
+    !/#?login\b/i.test(hash) &&
+    /#(dashboard|device|monitor|network|objects|policies|acc|panorama)\b/i.test(hash);
+  if (!hasSt0 && !hashShell) {
     return Promise.resolve({ ok: false, authenticated: false, url, via: "no-token" });
   }
 
   const origin = String(location.origin || "");
-  const paths = [`/php/?_ka=${Date.now()}`, `/?_ka=${Date.now()}`];
+  const ts = Date.now();
+  const paths = [
+    `/php/?_ka=${ts}`,
+    `/?_ka=${ts}`,
+    `/php/device/panorama/get.php?_ka=${ts}`,
+    `/php/utils/monitor.php?_ka=${ts}`,
+  ];
   return (async () => {
+    try {
+      const opts = { bubbles: true, cancelable: true, view: window, clientX: 12, clientY: 12 };
+      for (const target of [window, document, document.documentElement, document.body]) {
+        if (!target || typeof target.dispatchEvent !== "function") continue;
+        target.dispatchEvent(new MouseEvent("mousemove", opts));
+        target.dispatchEvent(new MouseEvent("mousedown", opts));
+        target.dispatchEvent(new MouseEvent("mouseup", opts));
+      }
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", bubbles: true }));
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (hashShell) {
+        const base = hash.replace(/[?&]_ka=\d+/g, "");
+        const next = `${base}${base.includes("?") ? "&" : "?"}_ka=${ts}`;
+        history.replaceState(null, "", `${location.pathname}${location.search}${next}`);
+        window.dispatchEvent(new Event("hashchange"));
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      const pan = window.Pan;
+      if (pan && pan.base) {
+        if (typeof pan.base.ajax === "function") {
+          /* best-effort; ignore result */
+        }
+        if (typeof pan.base.refresh === "function") pan.base.refresh();
+      }
+    } catch {
+      /* ignore */
+    }
+    let touched = false;
+    let lastFailUrl = url;
     for (const p of paths) {
       try {
         const res = await fetch(`${origin}${p}`, {
@@ -465,15 +548,26 @@ function panOsTabKeepAliveFunc() {
         if (/logged out due to inactivity|you have been logged out/i.test(text)) {
           return { ok: false, authenticated: false, url: finalUrl, via: "fetch-idle-logout" };
         }
-        if (/window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(text) || (window.Pan && window.Pan.st && window.Pan.st.st && window.Pan.st.st.st0)) {
-          return { ok: true, authenticated: true, url: finalUrl, via: "fetch-php" };
+        if (res.ok || res.status === 200 || res.status === 304) {
+          touched = true;
+          break;
         }
+        lastFailUrl = finalUrl;
       } catch {
         /* try next path */
       }
     }
-    // Still logged in in this tab even if fetch bodies were odd — count as ok touch attempt.
-    return { ok: true, authenticated: true, url, via: "token-only" };
+    if (touched) {
+      return { ok: true, authenticated: true, url, via: "fetch-php" };
+    }
+    // Authenticated but no session touch — report failure so we do not fake a refresh.
+    return {
+      ok: false,
+      authenticated: true,
+      url: lastFailUrl || url,
+      via: "no-touch",
+      reason: "Could not refresh session from tab",
+    };
   })();
 }
 
@@ -554,7 +648,7 @@ async function keepAlivePanOsFromTab(host, { createIfMissing = false, ephemeralH
     if (result?.authenticated && result?.ok) {
       return { ok: true, host: key, url: result.url || tab.url || `https://${key}/` };
     }
-    if (result && (isPanOsMgmtUrl(result.url || tab.url || "") || result.via === "idle-logout" || result.via === "mgmt-path" || result.via === "no-token")) {
+    if (result && (result.via === "idle-logout" || result.via === "mgmt-path" || result.via === "no-token" || result.via === "fetch-login" || result.via === "fetch-idle-logout" || isPanOsMgmtUrl(result.url || tab.url || ""))) {
       return {
         ok: false,
         host: key,
@@ -562,7 +656,16 @@ async function keepAlivePanOsFromTab(host, { createIfMissing = false, ephemeralH
         reason: expiredReason,
       };
     }
+    if (result?.via === "no-touch" || (result && result.authenticated && !result.ok)) {
+      return {
+        ok: false,
+        host: key,
+        url: result.url || tab.url || "",
+        reason: result.reason || "Could not refresh session from tab",
+      };
+    }
   } catch {
+    // Missing host permission / scripting blocked — fall through to background fetch.
     return null;
   }
   return null;
@@ -841,6 +944,16 @@ function getAllAlarms() {
   });
 }
 
+async function clearKeepAliveAlarms() {
+  const existing = await getAllAlarms();
+  for (const alarm of existing) {
+    const name = alarm.name || "";
+    if (name === ALARM_NAME || name.startsWith(ALARM_PREFIX)) {
+      await chrome.alarms.clear(name);
+    }
+  }
+}
+
 async function scheduleFromState(state) {
   const ephemeralHosts = state.ephemeralHosts ?? (await getEphemeralHosts());
   const wanted = new Map();
@@ -863,8 +976,10 @@ async function scheduleFromState(state) {
     }
   }
   for (const [name, interval] of wanted) {
+    // First fire ASAP (~1 min minimum). Waiting a full interval first loses the race
+    // when Idle Timeout equals the refresh interval (e.g. both 5 min).
     chrome.alarms.create(name, {
-      delayInMinutes: interval,
+      delayInMinutes: 1,
       periodInMinutes: interval,
     });
   }
@@ -1149,7 +1264,8 @@ async function maybeRecognizePanFirewallFromTabUrl(url, tabId) {
   const missAt = Number(misses[host] || 0);
   if (!knownMgmt && !tabId && missAt && Date.now() - missAt < 15 * 60 * 1000) return;
   if (tabId) await clearProbeMiss(host);
-  if (!(await hasHostPermissions([host]))) return;
+  // Firefox needs the specific host origin for scripting IP tabs; wildcard alone is not enough.
+  if (!(await hasSpecificHostPermissions([host]))) return;
   autoEnableInFlight.add(host);
   try {
     const probe = await probePanOsHost(host, tabId);
@@ -1179,9 +1295,12 @@ async function clearAutoEnableSkipIfNoTabs(host) {
 chrome.runtime.onInstalled.addListener(() => {
   void (async () => {
     await sessionReady;
+    // Recreate alarms so first refresh is ~1 min, not a full interval after upgrades.
+    await clearKeepAliveAlarms();
     const state = await storageGet();
-    await scheduleFromState(state);
-    await syncBadge(state);
+    const ephemeralHosts = await getEphemeralHosts();
+    await scheduleFromState({ ...state, ephemeralHosts });
+    await syncBadge({ ...state, ephemeralHosts });
   })();
 });
 
@@ -1228,6 +1347,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       await sessionReady;
       if (message?.type === "get-state") {
         await scanOpenTabsForPanFirewall();
+        const state = await publicState();
+        const needHostPermissions = [];
+        const seenNeed = new Set();
+        const consider = async (host) => {
+          const key = normalizeHost(host);
+          if (!key || seenNeed.has(key) || isScmHost(key)) return;
+          if (await hasSpecificHostPermissions([key])) return;
+          seenNeed.add(key);
+          needHostPermissions.push(key);
+        };
+        if (state.recognizePanFirewall) {
+          for (const c of await listRecognizeCandidates()) await consider(c.host);
+        }
+        for (const row of state.rows || []) await consider(row.host);
+        sendResponse({ ok: true, state, needHostPermissions });
+        return;
+      }
+      if (message?.type === "rescan-pan-firewall") {
+        await scanOpenTabsForPanFirewall();
         sendResponse({ ok: true, state: await publicState() });
         return;
       }
@@ -1271,17 +1409,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === "set-recognize-pan-firewall") {
         const recognizePanFirewall = Boolean(message.recognizePanFirewall);
         await storageSet({ recognizePanFirewall });
+        const needHostPermissions = [];
         if (recognizePanFirewall) {
-          try {
-            const tabs = await tabsQuery({});
-            for (const tab of tabs || []) {
-              if (tab?.url) await maybeRecognizePanFirewallFromTabUrl(tab.url, tab.id);
-            }
-          } catch {
-            /* ignore */
+          for (const c of await listRecognizeCandidates()) {
+            if (!(await hasSpecificHostPermissions([c.host]))) needHostPermissions.push(c.host);
           }
+          await scanOpenTabsForPanFirewall();
         }
-        sendResponse({ ok: true, state: await publicState() });
+        sendResponse({ ok: true, state: await publicState(), needHostPermissions });
         return;
       }
       if (message?.type === "set-host-enabled") {

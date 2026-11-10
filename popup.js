@@ -258,8 +258,17 @@ function render(state) {
 }
 
 async function load() {
-  const res = await send({ type: "get-state" });
+  let res = await send({ type: "get-state" });
   if (!res?.ok) throw new Error(res?.error || "Could not read state");
+  // Firefox needs per-host grants (https://*/* alone does not allow scripting IP tabs).
+  const needed = Array.isArray(res.needHostPermissions) ? res.needHostPermissions : [];
+  if (needed.length) {
+    const granted = await requestHostPermissions(needed);
+    if (granted) {
+      res = await send({ type: "rescan-pan-firewall" });
+      if (!res?.ok) throw new Error(res?.error || "Could not rescan tabs");
+    }
+  }
   render(res.state);
 }
 
@@ -365,10 +374,16 @@ recognizeFwEl.addEventListener("change", () => {
           return;
         }
       }
-      const res = await send({
+      let res = await send({
         type: "set-recognize-pan-firewall",
         recognizePanFirewall: recognizeFwEl.checked,
       });
+      if (res?.ok && res.needHostPermissions?.length) {
+        const grantedHosts = await requestHostPermissions(res.needHostPermissions);
+        if (grantedHosts) {
+          res = await send({ type: "rescan-pan-firewall" });
+        }
+      }
       if (res?.ok) {
         showError("");
         render(res.state);

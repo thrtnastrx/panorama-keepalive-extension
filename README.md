@@ -4,7 +4,7 @@ Browser extension (Edge / Chrome / Firefox) that quietly refreshes an existing P
 
 Uses cookies already in the browser. Does **not** store a password.
 
-Current version: **0.1.23**
+Current version: **0.1.24**
 
 ## Share / install
 
@@ -41,8 +41,10 @@ After a code update, click **Reload** on the extension card.
 
 - **Panorama:** background `GET` of the UI (`/` and `/php/`)
 - **SCM:** pokes an SCM tab (opens one in the background if needed)
-- **Ephemeral firewall:** same-origin fetch of `/php/` inside a logged-in UI tab (PAN sends `X-Frame-Options: DENY`, so iframes cannot keep the session). Recognition needs a logged-in session (`st0` ServerToken) — the login page alone will not auto-enable
-- Closing the browser clears Active checks and ephemeral firewalls; permanent hosts/aliases/intervals stay
+- **Ephemeral / self-signed:** keep-alive runs inside the open UI tab (same-origin fetch + light UI nudge). Opening the popup requests **per-host** permission (Firefox needs that for IP tabs; `https://*/*` alone is not enough)
+- First refresh fires within ~1 minute (not after a full interval) so a 5‑minute Idle Timeout is not lost to the first alarm
+- Use a refresh interval **shorter** than the device Idle Timeout (e.g. Idle 5 → refresh 5 is a race; prefer 5 Idle with this build’s early first ping, or Idle ≥ 10)
+- Closing the browser clears Active checks and ephemeral hosts; permanent hosts/aliases/intervals stay
 - Does not beat Max Session Time or Duo lifetime
 
 ## Privacy
