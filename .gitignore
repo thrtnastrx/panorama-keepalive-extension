@@ -1,0 +1,15 @@
+# AMO / local secrets (never commit)
+.amo.env
+.amo-upload-uuid
+
+# Signed build output (attach latest .xpi to GitHub Releases instead)
+web-ext-artifacts/
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Node
+node_modules/

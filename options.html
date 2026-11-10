@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Panorama Keep-Alive</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 1.5rem;
+        max-width: 40rem;
+        font: 15px/1.45 system-ui, sans-serif;
+        background: #1c2228;
+        color: #d7dde3;
+      }
+      h1 {
+        font-size: 1.35rem;
+        margin: 0 0 0.75rem;
+      }
+      p {
+        color: #9aa6b2;
+      }
+      code {
+        font: 13px ui-monospace, monospace;
+        color: #e8eef3;
+      }
+      label {
+        display: block;
+        margin-top: 1rem;
+        font-weight: 650;
+        color: #e8eef3;
+      }
+      textarea {
+        width: 100%;
+        min-height: 9rem;
+        margin-top: 0.35rem;
+        padding: 0.5rem;
+        box-sizing: border-box;
+        background: #11161b;
+        color: #e8eef3;
+        border: 1px solid #3a4450;
+        border-radius: 6px;
+        font: 13px/1.4 ui-monospace, monospace;
+      }
+      button {
+        margin-top: 1rem;
+        padding: 0.45rem 1rem;
+        background: #2a333c;
+        color: #e8eef3;
+        border: 1px solid #4b5864;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      #status {
+        min-height: 1.2em;
+        color: #8adf8a;
+      }
+      #status.is-error {
+        color: #f0b429;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Panorama Keep-Alive</h1>
+    <p>
+      Add each Panorama FQDN or firewall IP, one per line. Optional alias after the host
+      (for example <code>10.1.2.3 Chicago PA-5220</code>). Strata Cloud Manager is already
+      listed in the popup — just enable it. The extension uses cookies already in this
+      browser. Edge will ask for permission when you save.
+    </p>
+    <form id="opts">
+      <label for="hosts">Panorama hosts</label>
+      <textarea
+        id="hosts"
+        spellcheck="false"
+        placeholder="panorama.example.com&#10;10.1.2.3 Chicago PA-5220"
+      ></textarea>
+      <button type="submit">Save hosts</button>
+    </form>
+    <p id="status"></p>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

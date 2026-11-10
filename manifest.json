@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "Panorama Keep-Alive",
+  "short_name": "Pano Keep-Alive",
+  "version": "0.1.21",
+  "description": "Quietly refresh your Panorama web login to avoid idle-timer logouts",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Panorama Keep-Alive",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "permissions": ["alarms", "storage", "tabs", "scripting"],
+  "optional_host_permissions": ["https://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://stratacloudmanager.paloaltonetworks.com/*"],
+      "js": ["scm_keepalive.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "panorama-keepalive@aa-lab.local",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  }
+}

@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Panorama Keep-Alive</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+      }
+      body {
+        width: 28rem;
+        font: 13px/1.45 system-ui, sans-serif;
+        background: #1c2228;
+        color: #d7dde3;
+      }
+      main {
+        padding: 12px 14px 14px;
+      }
+      .popup-top {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        margin: -12px -14px 0;
+        padding: 12px 14px 8px;
+        background: #1c2228;
+        box-shadow: 0 8px 12px #1c2228;
+      }
+      .host-scroll {
+        padding: 2px 0 6px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 15px;
+        font-weight: 650;
+      }
+      p {
+        margin: 0 0 10px;
+        color: #9aa6b2;
+      }
+      label.row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 10px 0;
+        font-weight: 600;
+        color: #e8eef3;
+      }
+      select {
+        margin-left: auto;
+        background: #11161b;
+        color: #e8eef3;
+        border: 1px solid #3a4450;
+        border-radius: 6px;
+        padding: 4px 8px;
+      }
+      button {
+        background: #2a333c;
+        color: #e8eef3;
+        border: 1px solid #4b5864;
+        border-radius: 6px;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #36414b;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      #hosts {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin: 0 0 4px;
+      }
+      .host {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        padding: 7px 8px;
+        background: #151a1f;
+        border: 1px solid #2f3942;
+        border-radius: 6px;
+      }
+      .host-interval {
+        grid-column: 2 / 3;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #9aa6b2;
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .host-interval select {
+        margin-left: 0;
+        font-size: 12px;
+        padding: 2px 6px;
+      }
+      .host-id {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+      }
+      .host-alias {
+        width: 100%;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        color: #e8eef3;
+        font: inherit;
+        font-weight: 650;
+      }
+      .host-alias[hidden] {
+        display: none;
+      }
+      .host-alias:focus {
+        padding: 1px 4px;
+        background: #11161b;
+        border-color: #4b5864;
+        outline: none;
+      }
+      .host-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #9aa6b2;
+        font-size: 12px;
+        cursor: text;
+      }
+      .host-name.is-primary {
+        color: #e8eef3;
+        font-size: inherit;
+        font-weight: 650;
+      }
+      .host-status {
+        font-weight: 700;
+        font-size: 12px;
+      }
+      .host-status.is-active {
+        color: #8adf8a;
+      }
+      .host-status.is-inactive {
+        color: #9aa6b2;
+      }
+      .toggle-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin: 0 0 8px;
+        color: #c5ced6;
+        font-size: 12px;
+        line-height: 1.35;
+        cursor: pointer;
+      }
+      .toggle-row input {
+        margin: 2px 0 0;
+      }
+      .host-status.is-connecting {
+        color: #f4c542;
+      }
+      .host.is-connecting {
+        border-color: #5a4a1e;
+      }
+      .host-note {
+        grid-column: 2 / -1;
+        color: #9aa6b2;
+        font-size: 12px;
+      }
+      .host-note.is-error {
+        color: #f0b429;
+      }
+      .host-note.is-muted {
+        color: #9aa6b2;
+      }
+      #empty,
+      #status {
+        min-height: 1.2em;
+        margin: 8px 0 0;
+        color: #c5d0d8;
+      }
+      #status.is-error,
+      #empty {
+        color: #f0b429;
+      }
+      #progress {
+        margin: 4px 0 8px;
+      }
+      #progress[hidden] {
+        display: none;
+      }
+      .progress-track {
+        height: 8px;
+        background: #11161b;
+        border: 1px solid #3a4450;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      #progress-bar {
+        height: 100%;
+        width: 0;
+        background: #f4c542;
+        transition: width 0.2s ease;
+      }
+      #progress.is-busy .progress-track {
+        position: relative;
+      }
+      #progress.is-busy #progress-bar {
+        width: 38%;
+        transition: none;
+        animation: progress-slide 1.15s ease-in-out infinite;
+      }
+      @keyframes progress-slide {
+        0% {
+          transform: translateX(-30%);
+        }
+        100% {
+          transform: translateX(180%);
+        }
+      }
+      #progress-label {
+        margin: 6px 0 0;
+        color: #9aa6b2;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="popup-top">
+        <h1>Panorama Keep-Alive</h1>
+        <p>Check a host after you log in. Closing the browser clears Active; hosts and intervals stay.</p>
+        <label class="row" for="hours">
+          Duration
+          <select id="hours">
+            <option value="1">1 hour</option>
+            <option value="2">2 hours</option>
+            <option value="4">4 hours</option>
+            <option value="8">8 hours</option>
+            <option value="12">12 hours</option>
+            <option value="24">24 hours</option>
+          </select>
+        </label>
+        <label class="toggle-row" for="auto-enable">
+          <input type="checkbox" id="auto-enable" />
+          <span>Auto-enable when I open a matching Panorama or SCM tab (needs host permission already allowed)</span>
+        </label>
+        <label class="toggle-row" for="recognize-fw">
+          <input type="checkbox" id="recognize-fw" />
+          <span>Recognize a PAN firewall tab (ephemeral IP — keep alive until I turn it off; asks for HTTPS access)</span>
+        </label>
+        <div id="progress" hidden>
+          <div class="progress-track" aria-hidden="true">
+            <div id="progress-bar"></div>
+          </div>
+          <p id="progress-label"></p>
+        </div>
+      </div>
+      <div class="host-scroll">
+        <div id="hosts"></div>
+        <p id="empty" hidden>Add Panorama hosts in Options, or enable Recognize a PAN firewall.</p>
+      </div>
+      <div class="popup-bottom">
+        <div class="actions">
+          <button type="button" id="ping">Refresh now</button>
+          <button type="button" id="options">Hosts…</button>
+        </div>
+        <p id="status"></p>
+      </div>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
