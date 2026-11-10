@@ -2,13 +2,13 @@
 
 Browser extension (Edge / Chrome / Firefox) that quietly refreshes an existing Palo Alto **Panorama**, **firewall**, or **Strata Cloud Manager** web login so idle timers do not log you out.
 
-Uses cookies already in the browser. Does **not** store a password. Separate from Panorama Tools (PT3) keep-alive.
+Uses cookies already in the browser. Does **not** store a password.
 
 Current version: **0.1.21**
 
 ## Share / install
 
-### Firefox (easiest for others)
+### Firefox
 
 1. Download the signed `.xpi` from the latest [GitHub Release](https://github.com/thrtnastrx/panorama-keepalive-extension/releases)
 2. Open Firefox → **about:addons** → gear → **Install Add-on From File…**
@@ -25,6 +25,11 @@ Or open the `.xpi` file directly in Firefox.
 5. Pin the extension, open **Hosts…**, add Panorama FQDNs, enable keep-alive
 
 After a code update, click **Reload** on the extension card.
+
+## Requirements
+
+- You must already be logged into Panorama, the firewall, or SCM in **this** browser
+- The device needs a TLS certificate the browser trusts. Self-signed or untrusted certs break background refresh (`Failed to fetch`). For ephemeral firewalls, keep-alive can still work if you have accepted the certificate warning and leave a logged-in UI tab open
 
 ## Options (popup)
 
