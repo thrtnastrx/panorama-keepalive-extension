@@ -291,7 +291,7 @@ export function emptyEphemeralHostState() {
     until: "",
     untilManual: true,
     ephemeral: true,
-    alias: "PAN firewall",
+    alias: "This tab",
   };
 }
 

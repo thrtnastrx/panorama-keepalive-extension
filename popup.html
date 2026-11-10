@@ -239,7 +239,7 @@
     <main>
       <div class="popup-top">
         <h1>Panorama Keep-Alive</h1>
-        <p>Check a host after you log in. Closing the browser clears Active; hosts and intervals stay.</p>
+        <p>Keep a logged-in Panorama or firewall tab alive. Closing the browser clears Active and session tabs; saved hosts stay.</p>
         <label class="row" for="hours">
           Duration
           <select id="hours">
@@ -253,11 +253,7 @@
         </label>
         <label class="toggle-row" for="auto-enable">
           <input type="checkbox" id="auto-enable" />
-          <span>Auto-enable when I open a matching Panorama or SCM tab (needs host permission already allowed)</span>
-        </label>
-        <label class="toggle-row" for="recognize-fw">
-          <input type="checkbox" id="recognize-fw" />
-          <span>Recognize PAN-OS / Panorama tab after login (ephemeral IP — until I turn it off; asks for HTTPS access)</span>
+          <span>Auto-enable when I open a matching saved Panorama or SCM tab (needs host permission already allowed)</span>
         </label>
         <div id="progress" hidden>
           <div class="progress-track" aria-hidden="true">
@@ -268,11 +264,11 @@
       </div>
       <div class="host-scroll">
         <div id="hosts"></div>
-        <p id="empty" hidden>Add Panorama hosts in Options, or enable Recognize a PAN firewall.</p>
+        <p id="empty" hidden>Add saved hosts in Options, or use Add this tab for a session-only keep-alive.</p>
       </div>
       <div class="popup-bottom">
         <div class="actions">
-          <button type="button" id="scan">Scan tabs</button>
+          <button type="button" id="add-tab">Add this tab</button>
           <button type="button" id="ping">Refresh now</button>
           <button type="button" id="options">Hosts…</button>
         </div>

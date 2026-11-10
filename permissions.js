@@ -7,7 +7,7 @@ export function requestHostPermissions(hosts) {
   return chrome.permissions.request({ origins });
 }
 
-/** Broad HTTPS access so ephemeral PAN firewall IPs can be probed. User-gesture only. */
+/** Broad HTTPS access (optional). Prefer requestHostPermissions for a specific tab. */
 export function requestAllHttpsPermission() {
   return chrome.permissions.request({ origins: ["https://*/*"] });
 }

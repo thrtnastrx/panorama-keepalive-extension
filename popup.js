@@ -3,16 +3,16 @@ import {
   INTERVAL_OPTIONS,
   REASON_TURNED_OFF,
   connectingNote,
+  hostFromTabUrl,
 } from "./keepalive.js";
-import { requestAllHttpsPermission, requestHostPermissions } from "./permissions.js";
+import { requestHostPermissions } from "./permissions.js";
 
 const hoursEl = document.getElementById("hours");
 const autoEnableEl = document.getElementById("auto-enable");
-const recognizeFwEl = document.getElementById("recognize-fw");
 const hostsEl = document.getElementById("hosts");
 const emptyEl = document.getElementById("empty");
 const statusEl = document.getElementById("status");
-const scanEl = document.getElementById("scan");
+const addTabEl = document.getElementById("add-tab");
 const pingEl = document.getElementById("ping");
 const optionsEl = document.getElementById("options");
 const progressEl = document.getElementById("progress");
@@ -20,13 +20,6 @@ const progressBarEl = document.getElementById("progress-bar");
 const progressLabelEl = document.getElementById("progress-label");
 
 let lastState = null;
-
-function showRecognizeHints(hints) {
-  const blocked = (hints || []).filter((h) => h && h.ok === false && h.host);
-  if (!blocked.length) return;
-  const lines = blocked.slice(0, 4).map((h) => `${h.host}: ${h.reason}`);
-  showError(lines.join(" · "));
-}
 
 function send(message) {
   return new Promise((resolve, reject) => {
@@ -134,7 +127,6 @@ function render(state) {
   lastState = state;
   hoursEl.value = String(state.hours || 8);
   autoEnableEl.checked = Boolean(state.autoEnableOnTab);
-  recognizeFwEl.checked = Boolean(state.recognizePanFirewall);
   const rows = Array.isArray(state.rows) ? state.rows : [];
   emptyEl.hidden = rows.length > 0;
   hostsEl.replaceChildren();
@@ -171,7 +163,7 @@ function render(state) {
     aliasEl.spellcheck = false;
     aliasEl.value = row.alias || "";
     aliasEl.hidden = !row.alias;
-    aliasEl.title = "Friendly name for this firewall or Panorama";
+    aliasEl.title = "Friendly name for this host";
     aliasEl.addEventListener("click", (ev) => ev.stopPropagation());
     aliasEl.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") {
@@ -208,8 +200,8 @@ function render(state) {
     status.textContent =
       row.kind === "scm"
         ? `${row.status} · SCM`
-        : row.kind === "firewall" || row.ephemeral
-          ? `${row.status} · firewall`
+        : row.ephemeral
+          ? `${row.status} · session`
           : row.status;
 
     const intervalWrap = document.createElement("label");
@@ -237,6 +229,7 @@ function render(state) {
     intervalWrap.append(intervalEl);
 
     item.append(box, id, status, intervalWrap);
+
     if (row.lastError) {
       const note = document.createElement("span");
       note.className =
@@ -253,7 +246,9 @@ function render(state) {
     if (row.enabled && row.untilManual) {
       const note = document.createElement("span");
       note.className = "host-note";
-      note.textContent = "Until you turn it off";
+      note.textContent = row.ephemeral
+        ? "Session only — not saved in Hosts"
+        : "Until you turn it off";
       item.append(note);
     } else if (row.enabled && row.until) {
       const note = document.createElement("span");
@@ -268,42 +263,55 @@ function render(state) {
 async function load() {
   let res = await send({ type: "get-state" });
   if (!res?.ok) throw new Error(res?.error || "Could not read state");
-  // Firefox needs per-host grants (https://*/* alone does not allow scripting IP tabs).
+  // Firefox needs per-host grants for scripting IP tabs used by keep-alive.
   const needed = Array.isArray(res.needHostPermissions) ? res.needHostPermissions : [];
   if (needed.length) {
     const granted = await requestHostPermissions(needed);
     if (granted) {
-      res = await send({ type: "rescan-pan-firewall" });
-      if (!res?.ok) throw new Error(res?.error || "Could not rescan tabs");
+      res = await send({ type: "get-state" });
+      if (!res?.ok) throw new Error(res?.error || "Could not read state");
     }
   }
   render(res.state);
-  showRecognizeHints(res.recognizeHints);
 }
 
-async function scanOpenTabs() {
+async function addCurrentTab() {
   showError("");
-  let res = await send({ type: "get-state" });
-  if (!res?.ok) throw new Error(res?.error || "Could not read state");
-  const needed = Array.isArray(res.needHostPermissions) ? res.needHostPermissions : [];
-  if (needed.length) {
-    const granted = await requestHostPermissions(needed);
-    if (!granted) {
-      showError("Allow access to the open firewall/Panorama tab(s), then Scan tabs again");
-      showRecognizeHints(res.recognizeHints);
-      return;
-    }
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs?.[0];
+  const host = hostFromTabUrl(tab?.url || "");
+  if (!host) {
+    showError("Switch to an https:// Panorama or firewall tab, then try again");
+    return;
   }
-  res = await send({ type: "rescan-pan-firewall" });
-  if (!res?.ok) throw new Error(res?.error || "Could not rescan tabs");
-  if (res.needHostPermissions?.length) {
-    await requestHostPermissions(res.needHostPermissions);
-    res = await send({ type: "rescan-pan-firewall" });
+  const granted = await requestHostPermissions([host]);
+  if (!granted) {
+    showError(`Allow access to ${host}, then Add this tab again`);
+    return;
   }
+  setProgress({
+    phase: "host",
+    current: 0,
+    total: 1,
+    host,
+    label: host,
+    kind: "connect",
+  });
+  const res = await send({
+    type: "add-ephemeral-tab",
+    host,
+    tabId: tab.id,
+    title: tab.title || "",
+    hours: Number(hoursEl.value),
+  });
+  if (!res?.ok) {
+    hideProgress();
+    showError(res?.error || "Could not add this tab");
+    return;
+  }
+  setProgress({ phase: "done", current: 1, total: 1, host, kind: "connect" });
   render(res.state);
-  const stillBlocked = (res.recognizeHints || []).filter((h) => h && h.ok === false && h.host);
-  if (stillBlocked.length) showRecognizeHints(res.recognizeHints);
-  else showError("");
+  window.setTimeout(hideProgress, 700);
 }
 
 async function saveAlias(host, alias) {
@@ -339,7 +347,7 @@ async function setHostEnabled(item, host, enabled, permissionPromise, intervalMi
       if (!granted) {
         stopConnecting();
         if (lastState) render(lastState);
-        showError("Allow Edge access to this Panorama host, then enable again");
+        showError("Allow access to this host, then enable again");
         return;
       }
     }
@@ -397,55 +405,21 @@ autoEnableEl.addEventListener("change", () => {
   })();
 });
 
-recognizeFwEl.addEventListener("change", () => {
-  void (async () => {
-    try {
-      if (recognizeFwEl.checked) {
-        const granted = await requestAllHttpsPermission();
-        if (!granted) {
-          recognizeFwEl.checked = false;
-          showError("Allow HTTPS access to recognize firewall tabs");
-          return;
-        }
-      }
-      let res = await send({
-        type: "set-recognize-pan-firewall",
-        recognizePanFirewall: recognizeFwEl.checked,
-      });
-      if (res?.ok && res.needHostPermissions?.length) {
-        const grantedHosts = await requestHostPermissions(res.needHostPermissions);
-        if (grantedHosts) {
-          res = await send({ type: "rescan-pan-firewall" });
-        }
-      }
-      if (res?.ok) {
-        showError("");
-        render(res.state);
-      } else {
-        recognizeFwEl.checked = Boolean(lastState?.recognizePanFirewall);
-        showError(res?.error || "Could not save firewall recognition");
-      }
-    } catch (err) {
-      recognizeFwEl.checked = Boolean(lastState?.recognizePanFirewall);
-      showError(err instanceof Error ? err.message : String(err));
-    }
-  })();
-});
-
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== "ping-progress") return;
   setProgress(message);
 });
 
-scanEl.addEventListener("click", () => {
+addTabEl.addEventListener("click", () => {
   void (async () => {
-    scanEl.disabled = true;
+    addTabEl.disabled = true;
     try {
-      await scanOpenTabs();
+      await addCurrentTab();
     } catch (err) {
+      hideProgress();
       showError(err instanceof Error ? err.message : String(err));
     } finally {
-      scanEl.disabled = false;
+      addTabEl.disabled = false;
     }
   })();
 });

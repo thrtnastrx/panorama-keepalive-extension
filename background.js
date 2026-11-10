@@ -14,12 +14,8 @@ import {
   isKeepAlivePingFailure,
   isLoginExpiredReason,
   emptyEphemeralHostState,
-  hasPanOsServerToken,
-  hostFromTabUrl,
   isPanOsMgmtUrl,
   isScmHost,
-  looksLikeLoginUrl,
-  looksLikePanOsUi,
   looksLikeScmLoginUrl,
   matchConfiguredHostFromTab,
   mergeHostMap,
@@ -38,13 +34,11 @@ const DEFAULTS = {
   hostsText: "",
   hosts: {},
   autoEnableOnTab: false,
-  recognizePanFirewall: false,
 };
 
 const SESSION_MARKER_KEY = "kaBrowserSession";
 const SESSION_SKIP_KEY = "kaAutoEnableSkip";
 const SESSION_EPHEMERAL_KEY = "kaEphemeralHosts";
-const SESSION_PROBE_MISS_KEY = "kaPanProbeMiss";
 
 async function resetKeepAliveForNewBrowserSession() {
   let alreadyMarked = false;
@@ -70,7 +64,6 @@ async function resetKeepAliveForNewBrowserSession() {
       [SESSION_MARKER_KEY]: true,
       [SESSION_SKIP_KEY]: {},
       [SESSION_EPHEMERAL_KEY]: {},
-      [SESSION_PROBE_MISS_KEY]: {},
     });
   } catch {
     /* session storage unavailable — onStartup still clears once */
@@ -92,7 +85,6 @@ function storageGet() {
       raw.hostsText = String(raw.hostsText || "");
       raw.hosts = mergeHostMap(raw.hostsText, raw.hosts);
       raw.autoEnableOnTab = Boolean(raw.autoEnableOnTab);
-      raw.recognizePanFirewall = Boolean(raw.recognizePanFirewall);
       resolve(raw);
     });
   });
@@ -126,28 +118,6 @@ async function setEphemeralHosts(ephemeralHosts) {
   }
 }
 
-async function getProbeMisses() {
-  try {
-    const data = await chrome.storage.session.get(SESSION_PROBE_MISS_KEY);
-    const map = data?.[SESSION_PROBE_MISS_KEY];
-    return map && typeof map === "object" ? { ...map } : {};
-  } catch {
-    return {};
-  }
-}
-
-async function markProbeMiss(host) {
-  const key = normalizeHost(host);
-  if (!key) return;
-  const misses = await getProbeMisses();
-  misses[key] = Date.now();
-  try {
-    await chrome.storage.session.set({ [SESSION_PROBE_MISS_KEY]: misses });
-  } catch {
-    /* ignore */
-  }
-}
-
 async function publicState() {
   const state = await storageGet();
   const ephemeralHosts = await getEphemeralHosts();
@@ -155,7 +125,6 @@ async function publicState() {
     hours: state.hours,
     hostsText: state.hostsText,
     autoEnableOnTab: state.autoEnableOnTab,
-    recognizePanFirewall: state.recognizePanFirewall,
     rows: buildHostRows({ ...state, ephemeralHosts }),
   };
 }
@@ -206,38 +175,6 @@ async function hasHostPermissions(hosts) {
     /* ignore */
   }
   return false;
-}
-
-async function listRecognizeCandidates() {
-  const state = await storageGet();
-  const out = [];
-  const seen = new Set();
-  try {
-    const tabs = await tabsQuery({});
-    for (const tab of tabs || []) {
-      const host = hostFromTabUrl(tab?.url || "");
-      if (!host || isScmHost(host) || seen.has(host)) continue;
-      if (isPermanentHost(state, host)) continue;
-      seen.add(host);
-      out.push({ host, tabId: tab.id, url: tab.url || "" });
-    }
-  } catch {
-    /* ignore */
-  }
-  return out;
-}
-
-async function scanOpenTabsForPanFirewall({ force = false } = {}) {
-  const state = await storageGet();
-  if (!state.recognizePanFirewall) return;
-  try {
-    for (const c of await listRecognizeCandidates()) {
-      if (force && c.host) await setAutoEnableSkip(c.host, false);
-      if (c.tabId != null) await maybeRecognizePanFirewallFromTabUrl(c.url, c.tabId);
-    }
-  } catch {
-    /* ignore */
-  }
 }
 
 function tabsQuery(query) {
@@ -573,78 +510,6 @@ function panOsTabKeepAliveFunc() {
   })();
 }
 
-/** Read-only probe for recognition. Authenticated = logged-in shell (not /php/login.php). */
-function panOsTabProbeFunc() {
-  const url = String(location.href || "");
-  const html = String(document.documentElement?.outerHTML || "");
-  if (/logged out due to inactivity|you have been logged out/i.test(html)) {
-    return { ok: true, authenticated: false, url, via: "idle-logout" };
-  }
-  const path = String(location.pathname || "").replace(/\/+$/, "") || "/";
-  if (path === "/php/login.php" || path === "/php/logout.php") {
-    return { ok: true, authenticated: false, url, via: "mgmt-path" };
-  }
-  const st = window.Pan && window.Pan.st && window.Pan.st.st;
-  const token = st && st.st0;
-  if (typeof token === "string" && token) {
-    return { ok: true, authenticated: true, url, via: "token" };
-  }
-  if (/window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(html)) {
-    return { ok: true, authenticated: true, url, via: "html" };
-  }
-  // Panorama/PAN-OS app shell after login (hash routes like #dashboard) without scraping HTML.
-  const hash = String(location.hash || "");
-  if (
-    st &&
-    typeof st === "object" &&
-    hash &&
-    !/#?login\b/i.test(hash) &&
-    /#(dashboard|device|monitor|network|objects|policies|acc|panorama)\b/i.test(hash)
-  ) {
-    return { ok: true, authenticated: true, url, via: "pan-hash-shell" };
-  }
-  if (/window\.Pan\.st\.st\.st[0-9]+\s=\s"([^"]+)"/.test(html)) {
-    return { ok: true, authenticated: false, url, via: "pan-html-not-logged-in" };
-  }
-  if (window.Pan && path === "/" && /panorama|palo alto/i.test(String(document.title || ""))) {
-    return { ok: true, authenticated: false, url, via: "pan-title-unconfirmed" };
-  }
-  return { ok: false, authenticated: false, url, title: String(document.title || "") };
-}
-
-/**
- * Isolated-world fallback: read DOM/HTML only (no window.Pan).
- * Some firewall login pages set st0 in HTML — path check must win first.
- */
-function panOsTabProbeIsolatedFunc() {
-  const url = String(location.href || "");
-  const html = String(document.documentElement?.outerHTML || "");
-  const title = String(document.title || "");
-  if (/logged out due to inactivity|you have been logged out/i.test(html)) {
-    return { ok: true, authenticated: false, url, via: "idle-logout" };
-  }
-  const path = String(location.pathname || "").replace(/\/+$/, "") || "/";
-  if (path === "/php/login.php" || path === "/php/logout.php") {
-    return { ok: true, authenticated: false, url, via: "mgmt-path" };
-  }
-  const hash = String(location.hash || "");
-  if (/window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(html)) {
-    return { ok: true, authenticated: true, url, via: "html-isolated" };
-  }
-  if (
-    hash &&
-    !/#?login\b/i.test(hash) &&
-    /#(dashboard|device|monitor|network|objects|policies|acc|panorama)\b/i.test(hash) &&
-    /window\.Pan\.st\.st\.st[0-9]+\s=\s"([^"]+)"/.test(html)
-  ) {
-    return { ok: true, authenticated: true, url, via: "pan-hash-html" };
-  }
-  if (/window\.Pan\.st\.st\.st[0-9]+\s=\s"([^"]+)"/.test(html) || /palo alto|panorama|firewall/i.test(title)) {
-    return { ok: true, authenticated: false, url, via: "pan-html-not-logged-in", title };
-  }
-  return { ok: false, authenticated: false, url, title };
-}
-
 async function executePanOsTabScript(tabId, func, world = "MAIN") {
   const injected = await chrome.scripting.executeScript({
     target: { tabId },
@@ -716,83 +581,6 @@ async function pingEphemeralPanOsHost(host) {
     url: `https://${key}/`,
     reason: "Firewall login expired — sign in again in this browser",
   };
-}
-
-async function executePanOsTabProbe(tabId) {
-  try {
-    const main = await executePanOsTabScript(tabId, panOsTabProbeFunc, "MAIN");
-    if (main?.ok) return main;
-  } catch {
-    /* try isolated */
-  }
-  try {
-    return await executePanOsTabScript(tabId, panOsTabProbeIsolatedFunc, "ISOLATED");
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Explain why open HTTPS tabs are or are not recognized (for popup hints).
- * Does not enable keep-alive.
- */
-async function diagnoseRecognizeCandidates() {
-  const state = await storageGet();
-  const ephemeralHosts = await getEphemeralHosts();
-  const out = [];
-  if (!state.recognizePanFirewall) {
-    return [{ host: "", reason: "Recognize PAN-OS / Panorama is off" }];
-  }
-  const candidates = await listRecognizeCandidates();
-  if (!candidates.length) {
-    return [{ host: "", reason: "No other HTTPS tabs found (open the firewall UI tab first)" }];
-  }
-  for (const c of candidates) {
-    const key = c.host;
-    if (ephemeralHosts[key] && isHostKeepAliveActive(ephemeralHosts[key])) {
-      out.push({ host: key, reason: "already active", ok: true });
-      continue;
-    }
-    const skip = await getAutoEnableSkip();
-    if (skip[key]) {
-      out.push({ host: key, reason: "skipped after manual off — use Scan tabs to retry", ok: false });
-      continue;
-    }
-    if (!(await hasSpecificHostPermissions([key]))) {
-      out.push({ host: key, reason: "needs permission — allow when prompted", ok: false });
-      continue;
-    }
-    if (!c.tabId) {
-      out.push({ host: key, reason: "no tab id", ok: false });
-      continue;
-    }
-    try {
-      const probe = await probePanOsHost(key, c.tabId);
-      if (!probe.ok) {
-        out.push({ host: key, reason: "not a PAN-OS UI (or page still loading)", ok: false });
-        continue;
-      }
-      if (!probe.authenticated) {
-        const login = isPanOsMgmtUrl(probe.url || c.url || "");
-        out.push({
-          host: key,
-          reason: login
-            ? "on login page — sign in first (do not log out)"
-            : "tab open but not logged in yet",
-          ok: false,
-        });
-        continue;
-      }
-      out.push({ host: key, reason: "logged in — should appear after scan", ok: true });
-    } catch (err) {
-      out.push({
-        host: key,
-        reason: err instanceof Error ? err.message : "probe failed",
-        ok: false,
-      });
-    }
-  }
-  return out;
 }
 
 function emitProgress(payload) {
@@ -1216,79 +1004,11 @@ async function disableHostKeepAlive(host, { hours } = {}) {
   return { ok: true, state: await publicState() };
 }
 
-async function probePanOsHost(host, tabId) {
-  const key = normalizeHost(host);
-  if (!key || isScmHost(key)) return { ok: false };
-
-  // Prefer the open tab: self-signed certs break background fetch.
-  if (tabId) {
-    try {
-      const fromTab = await executePanOsTabProbe(tabId);
-      if (fromTab?.ok) {
-        return {
-          ok: true,
-          authenticated: Boolean(fromTab.authenticated),
-          url: fromTab.url || "",
-        };
-      }
-    } catch {
-      /* fall through to fetch / other tabs */
-    }
-  }
-
-  try {
-    const tabs = await tabsQuery({ url: [`https://${key}/*`] });
-    for (const tab of tabs || []) {
-      if (!tab?.id || tab.id === tabId) continue;
-      try {
-        const fromTab = await executePanOsTabProbe(tab.id);
-        if (fromTab?.ok) {
-          return {
-            ok: true,
-            authenticated: Boolean(fromTab.authenticated),
-            url: fromTab.url || tab.url || "",
-          };
-        }
-      } catch {
-        /* try next tab */
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-
-  const paths = ["/", "/php/", "/php/login.php"];
-  for (const path of paths) {
-    try {
-      const res = await fetch(`https://${key}${path}`, {
-        method: "GET",
-        credentials: "include",
-        redirect: "follow",
-        cache: "no-store",
-        headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
-      });
-      const url = res.url || `https://${key}${path}`;
-      const body = await res.text();
-      if (!looksLikePanOsUi(url, body)) continue;
-      // Some firewall login pages embed st0 in HTML — never treat login/logout as authenticated.
-      const authenticated = !isPanOsMgmtUrl(url) && !looksLikeLoginUrl(url) && hasPanOsServerToken(body);
-      return {
-        ok: true,
-        authenticated,
-        url,
-      };
-    } catch {
-      /* try next path */
-    }
-  }
-  return { ok: false };
-}
-
-async function enableEphemeralFirewall(host, { intervalMinutes, report = false } = {}) {
+async function enableEphemeralTab(host, { intervalMinutes, alias = "", report = false } = {}) {
   const key = normalizeHost(host);
   if (!key) return { ok: false, error: "Unknown host" };
-  if (!(await hasHostPermissions([key]))) {
-    return { ok: false, error: "Allow HTTPS access when enabling Recognize PAN firewall" };
+  if (!(await hasSpecificHostPermissions([key]))) {
+    return { ok: false, error: "Allow access to this tab’s host when prompted" };
   }
   const state = await storageGet();
   if (isPermanentHost(state, key)) {
@@ -1298,8 +1018,20 @@ async function enableEphemeralFirewall(host, { intervalMinutes, report = false }
       report,
     });
   }
+  if (isScmHost(key)) {
+    return enableHostKeepAlive(key, {
+      hours: state.hours,
+      intervalMinutes,
+      report,
+    });
+  }
   const ephemeralHosts = await getEphemeralHosts();
   const prev = ephemeralHosts[key] || {};
+  const fromTitle = sanitizeAlias(alias);
+  const nextAlias =
+    (fromTitle && !/^login$/i.test(fromTitle) ? fromTitle : "") ||
+    sanitizeAlias(prev.alias) ||
+    "This tab";
   ephemeralHosts[key] = {
     ...emptyEphemeralHostState(),
     ...prev,
@@ -1309,7 +1041,7 @@ async function enableEphemeralFirewall(host, { intervalMinutes, report = false }
     until: "",
     lastError: "",
     intervalMinutes: clampIntervalMinutes(intervalMinutes ?? prev.intervalMinutes),
-    alias: sanitizeAlias(prev.alias) || "PAN firewall",
+    alias: nextAlias,
   };
   await setEphemeralHosts(ephemeralHosts);
   await setAutoEnableSkip(key, false);
@@ -1343,56 +1075,6 @@ async function maybeAutoEnableFromTabUrl(url) {
   }
 }
 
-async function clearProbeMiss(host) {
-  const key = normalizeHost(host);
-  if (!key) return;
-  const misses = await getProbeMisses();
-  if (!misses[key]) return;
-  delete misses[key];
-  try {
-    await chrome.storage.session.set({ [SESSION_PROBE_MISS_KEY]: misses });
-  } catch {
-    /* ignore */
-  }
-}
-
-async function maybeRecognizePanFirewallFromTabUrl(url, tabId) {
-  await sessionReady;
-  const state = await storageGet();
-  if (!state.recognizePanFirewall) return;
-  const host = hostFromTabUrl(url);
-  if (!host || isScmHost(host)) return;
-  if (isPermanentHost(state, host)) return;
-  const ephemeralHosts = await getEphemeralHosts();
-  if (isHostKeepAliveActive(ephemeralHosts[host])) return;
-  const skip = await getAutoEnableSkip();
-  if (skip[host]) return;
-  if (autoEnableInFlight.has(host)) return;
-  // Known PAN mgmt URL (login/logout) or an open tab — wait for login; do not black-hole.
-  const knownMgmt = isPanOsMgmtUrl(url);
-  const misses = await getProbeMisses();
-  const missAt = Number(misses[host] || 0);
-  if (!knownMgmt && !tabId && missAt && Date.now() - missAt < 15 * 60 * 1000) return;
-  if (tabId) await clearProbeMiss(host);
-  // Firefox needs the specific host origin for scripting IP tabs; wildcard alone is not enough.
-  if (!(await hasSpecificHostPermissions([host]))) return;
-  autoEnableInFlight.add(host);
-  try {
-    const probe = await probePanOsHost(host, tabId);
-    if (!probe.ok) {
-      if (!knownMgmt && !tabId) await markProbeMiss(host);
-      return;
-    }
-    // Only st0 (logged-in) enables keep-alive; login.php is recognized but waits.
-    if (!probe.authenticated) return;
-    await enableEphemeralFirewall(host, { report: false });
-  } catch {
-    /* ignore */
-  } finally {
-    autoEnableInFlight.delete(host);
-  }
-}
-
 async function clearAutoEnableSkipIfNoTabs(host) {
   const key = normalizeHost(host);
   if (!key) return;
@@ -1405,6 +1087,12 @@ async function clearAutoEnableSkipIfNoTabs(host) {
 chrome.runtime.onInstalled.addListener(() => {
   void (async () => {
     await sessionReady;
+    // Drop legacy auto-recognize setting if present.
+    try {
+      await chrome.storage.local.remove("recognizePanFirewall");
+    } catch {
+      /* ignore */
+    }
     // Recreate alarms so first refresh is ~1 min, not a full interval after upgrades.
     await clearKeepAliveAlarms();
     const state = await storageGet();
@@ -1437,7 +1125,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const url = changeInfo.url || tab?.url || "";
   if (!url) return;
   void maybeAutoEnableFromTabUrl(url);
-  void maybeRecognizePanFirewallFromTabUrl(url, tabId);
 });
 
 chrome.tabs.onRemoved.addListener((_tabId, _removeInfo) => {
@@ -1456,37 +1143,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       await sessionReady;
       if (message?.type === "get-state") {
-        await scanOpenTabsForPanFirewall({ force: false });
         const state = await publicState();
         const needHostPermissions = [];
         const seenNeed = new Set();
-        const consider = async (host) => {
-          const key = normalizeHost(host);
-          if (!key || seenNeed.has(key) || isScmHost(key)) return;
-          if (await hasSpecificHostPermissions([key])) return;
+        for (const row of state.rows || []) {
+          const key = normalizeHost(row.host);
+          if (!key || seenNeed.has(key) || isScmHost(key)) continue;
+          if (await hasSpecificHostPermissions([key])) continue;
           seenNeed.add(key);
           needHostPermissions.push(key);
-        };
-        if (state.recognizePanFirewall) {
-          for (const c of await listRecognizeCandidates()) await consider(c.host);
         }
-        for (const row of state.rows || []) await consider(row.host);
-        const recognizeHints = state.recognizePanFirewall ? await diagnoseRecognizeCandidates() : [];
-        sendResponse({ ok: true, state, needHostPermissions, recognizeHints });
+        sendResponse({ ok: true, state, needHostPermissions });
         return;
       }
-      if (message?.type === "rescan-pan-firewall") {
-        // Explicit scan clears "turned off" skip so the open tab can reappear.
-        await scanOpenTabsForPanFirewall({ force: true });
-        const state = await publicState();
-        const recognizeHints = state.recognizePanFirewall ? await diagnoseRecognizeCandidates() : [];
-        const needHostPermissions = [];
-        if (state.recognizePanFirewall) {
-          for (const c of await listRecognizeCandidates()) {
-            if (!(await hasSpecificHostPermissions([c.host]))) needHostPermissions.push(c.host);
-          }
+      if (message?.type === "add-ephemeral-tab") {
+        const host = normalizeHost(message.host);
+        if (!host) {
+          sendResponse({ ok: false, error: "Open an https:// Panorama or firewall tab first" });
+          return;
         }
-        sendResponse({ ok: true, state, recognizeHints, needHostPermissions });
+        sendResponse(
+          await enableEphemeralTab(host, {
+            intervalMinutes: message.intervalMinutes,
+            alias: message.title || message.alias || "",
+            report: true,
+          }),
+        );
         return;
       }
       if (message?.type === "save-hosts") {
@@ -1526,19 +1208,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: true, state: await publicState() });
         return;
       }
-      if (message?.type === "set-recognize-pan-firewall") {
-        const recognizePanFirewall = Boolean(message.recognizePanFirewall);
-        await storageSet({ recognizePanFirewall });
-        const needHostPermissions = [];
-        if (recognizePanFirewall) {
-          for (const c of await listRecognizeCandidates()) {
-            if (!(await hasSpecificHostPermissions([c.host]))) needHostPermissions.push(c.host);
-          }
-          await scanOpenTabsForPanFirewall();
-        }
-        sendResponse({ ok: true, state: await publicState(), needHostPermissions });
-        return;
-      }
       if (message?.type === "set-host-enabled") {
         const host = normalizeHost(message.host);
         const enabled = Boolean(message.enabled);
@@ -1546,7 +1215,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (enabled) {
           const state = await storageGet();
           const ephemeralHosts = await getEphemeralHosts();
-          if (isPermanentHost(state, host)) {
+          if (isPermanentHost(state, host) || isScmHost(host)) {
             sendResponse(
               await enableHostKeepAlive(host, {
                 hours,
@@ -1558,14 +1227,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }
           if (ephemeralHosts[host]) {
             sendResponse(
-              await enableEphemeralFirewall(host, {
+              await enableEphemeralTab(host, {
                 intervalMinutes: message.intervalMinutes,
                 report: true,
               }),
             );
             return;
           }
-          sendResponse({ ok: false, error: "Unknown host" });
+          sendResponse({ ok: false, error: "Unknown host — use Add this tab for session keep-alive" });
           return;
         }
         sendResponse(await disableHostKeepAlive(host, { hours }));
