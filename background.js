@@ -111,11 +111,7 @@ async function getEphemeralHosts() {
 }
 
 async function setEphemeralHosts(ephemeralHosts) {
-  try {
-    await chrome.storage.session.set({ [SESSION_EPHEMERAL_KEY]: ephemeralHosts || {} });
-  } catch {
-    /* ignore */
-  }
+  await chrome.storage.session.set({ [SESSION_EPHEMERAL_KEY]: ephemeralHosts || {} });
 }
 
 async function publicState() {
@@ -636,7 +632,10 @@ async function writeHostRow(state, ephemeralHosts, host, nextRow, ephemeral) {
   await storageSet({ hosts: state.hosts });
 }
 
-/** Apply ping result; login-expired stops keep-alive (ephemeral rows are removed). */
+/**
+ * Apply ping result. Session (ephemeral) rows stay in the list until the user turns
+ * them off — a failed first connect must not make "Add this tab" vanish.
+ */
 function rowAfterPing(row, result, { ephemeral = false } = {}) {
   if (result?.ok) {
     return {
@@ -647,7 +646,15 @@ function rowAfterPing(row, result, { ephemeral = false } = {}) {
   }
   const reason = result?.reason || "Refresh failed";
   if (isLoginExpiredReason(reason)) {
-    if (ephemeral) return null;
+    if (ephemeral) {
+      return {
+        ...row,
+        enabled: true,
+        untilManual: true,
+        until: "",
+        lastError: reason,
+      };
+    }
     return {
       ...row,
       enabled: false,
@@ -1046,7 +1053,11 @@ async function enableEphemeralTab(host, { intervalMinutes, alias = "", report = 
   await setEphemeralHosts(ephemeralHosts);
   await setAutoEnableSkip(key, false);
   await scheduleFromState({ ...state, ephemeralHosts });
-  await refreshHost(key, { report, kind: "connect" });
+  try {
+    await refreshHost(key, { report, kind: "connect" });
+  } catch {
+    /* row stays in session list even if the first refresh throws */
+  }
   return { ok: true, state: await publicState() };
 }
 

@@ -4,7 +4,7 @@ Browser extension (Edge / Chrome / Firefox) that quietly refreshes an existing P
 
 Uses cookies already in the browser. Does **not** store a password.
 
-Current version: **0.1.27**
+Current version: **0.1.28**
 
 ## Share / install
 
