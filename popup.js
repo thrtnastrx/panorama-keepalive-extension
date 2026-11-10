@@ -20,6 +20,8 @@ const progressBarEl = document.getElementById("progress-bar");
 const progressLabelEl = document.getElementById("progress-label");
 
 let lastState = null;
+/** Active tab at popup open — needed so Add this tab can call permissions.request in the click turn. */
+let activeTabInfo = { host: "", tabId: null, title: "" };
 
 function send(message) {
   return new Promise((resolve, reject) => {
@@ -260,31 +262,41 @@ function render(state) {
   }
 }
 
-async function load() {
-  let res = await send({ type: "get-state" });
-  if (!res?.ok) throw new Error(res?.error || "Could not read state");
-  // Firefox needs per-host grants for scripting IP tabs used by keep-alive.
-  const needed = Array.isArray(res.needHostPermissions) ? res.needHostPermissions : [];
-  if (needed.length) {
-    const granted = await requestHostPermissions(needed);
-    if (granted) {
-      res = await send({ type: "get-state" });
-      if (!res?.ok) throw new Error(res?.error || "Could not read state");
-    }
+async function refreshActiveTabInfo() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs?.[0];
+    activeTabInfo = {
+      host: hostFromTabUrl(tab?.url || ""),
+      tabId: tab?.id ?? null,
+      title: tab?.title || "",
+    };
+  } catch {
+    activeTabInfo = { host: "", tabId: null, title: "" };
   }
+}
+
+async function load() {
+  // Cache the active tab before the user clicks Add this tab (permission needs a click gesture).
+  const tabReady = refreshActiveTabInfo();
+  const res = await send({ type: "get-state" });
+  await tabReady;
+  if (!res?.ok) throw new Error(res?.error || "Could not read state");
   render(res.state);
 }
 
-async function addCurrentTab() {
+/**
+ * @param {Promise<boolean>|null} permissionPromise must be started in the click handler
+ *   (Firefox: permissions.request after await tabs.query fails user-input-handler check).
+ */
+async function addCurrentTab(permissionPromise) {
   showError("");
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs?.[0];
-  const host = hostFromTabUrl(tab?.url || "");
+  let { host, tabId, title } = activeTabInfo;
   if (!host) {
-    showError("Switch to an https:// Panorama or firewall tab, then try again");
+    showError("Switch to an https:// Panorama or firewall tab, then open this popup again");
     return;
   }
-  const granted = await requestHostPermissions([host]);
+  const granted = await (permissionPromise ?? Promise.resolve(false));
   if (!granted) {
     showError(`Allow access to ${host}, then Add this tab again`);
     return;
@@ -300,8 +312,8 @@ async function addCurrentTab() {
   const res = await send({
     type: "add-ephemeral-tab",
     host,
-    tabId: tab.id,
-    title: tab.title || "",
+    tabId,
+    title: title || "",
     hours: Number(hoursEl.value),
   });
   if (!res?.ok) {
@@ -411,10 +423,13 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 addTabEl.addEventListener("click", () => {
+  // Must call permissions.request in this turn — do not await tabs.query first.
+  const host = activeTabInfo.host;
+  const permissionPromise = host ? requestHostPermissions([host]) : Promise.resolve(false);
   void (async () => {
     addTabEl.disabled = true;
     try {
-      await addCurrentTab();
+      await addCurrentTab(permissionPromise);
     } catch (err) {
       hideProgress();
       showError(err instanceof Error ? err.message : String(err));
