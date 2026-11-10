@@ -8,7 +8,10 @@ export const DEFAULT_INTERVAL_MINUTES = 10;
 export const HOUR_OPTIONS = [1, 2, 4, 8, 12, 24];
 export const DEFAULT_HOURS = 8;
 
-const SERVER_TOKEN_RE = /window\.Pan\.st\.st\.st[0-9]+\s=\s"(\w+)"/;
+/** Logged-in UI ServerToken (st0). Login pages often set st10 — that is not a session. */
+const SERVER_TOKEN_RE = /window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/;
+/** Any Pan.st.st.stN assignment — identifies PAN-OS UI HTML, including the login page. */
+const PAN_ST_ANY_RE = /window\.Pan\.st\.st\.st[0-9]+\s=\s"([^"]+)"/;
 const LOGIN_BODY_RE = /name=["']passwd["']|name=["']user["'][\s\S]*Log In|php\/login\.php/i;
 
 export const ALIAS_MAX_LENGTH = 48;
@@ -138,19 +141,24 @@ export function isPanOsLoginUrl(url) {
   return pathnameFromUrl(url) === "/php/login.php";
 }
 
-/** Authenticated PAN-OS/Panorama UI: exact ServerToken assignment in page HTML. */
+/** Authenticated PAN-OS/Panorama UI: exact st0 ServerToken in page HTML (not login st10). */
 export function hasPanOsServerToken(body) {
   return SERVER_TOKEN_RE.test(String(body || ""));
+}
+
+/** PAN-OS UI HTML (login or app), including non-st0 Pan.st tokens. */
+export function looksLikePanOsHtml(body) {
+  return PAN_ST_ANY_RE.test(String(body || "")) || hasPanOsServerToken(body);
 }
 
 /**
  * True only for hard PAN-OS identifiers:
  * - URL path exactly /php/login.php or /php/logout.php, or
- * - body contains window.Pan.st.st.stN = "…" (authenticated UI ServerToken)
+ * - body contains any window.Pan.st.st.stN = "…"
  */
 export function looksLikePanOsUi(url, body) {
   if (isPanOsMgmtUrl(url)) return true;
-  return hasPanOsServerToken(body);
+  return looksLikePanOsHtml(body);
 }
 
 export function looksLikeScmLoginUrl(url) {

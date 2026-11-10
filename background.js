@@ -403,57 +403,78 @@ async function ensurePanOsTab(host) {
 
 /**
  * Runs in the firewall tab MAIN world.
- * PAN-OS resets admin Idle on management UI page refreshes (Dashboard/Monitor/etc.),
- * not on extension background fetch — load /php/ in a hidden iframe.
+ * PAN-OS resets admin Idle on management UI activity. X-Frame-Options: DENY blocks
+ * iframes, so same-origin fetch from the page is used instead of an iframe.
  */
 function panOsTabKeepAliveFunc() {
   const url = String(location.href || "");
   const html = String(document.documentElement?.outerHTML || "");
   if (/logged out due to inactivity|you have been logged out/i.test(html)) {
-    return { ok: false, authenticated: false, url, via: "idle-logout" };
+    return Promise.resolve({ ok: false, authenticated: false, url, via: "idle-logout" });
   }
   const path = String(location.pathname || "").replace(/\/+$/, "") || "/";
   if (path === "/php/login.php" || path === "/php/logout.php") {
-    return { ok: false, authenticated: false, url, via: "mgmt-path" };
+    return Promise.resolve({ ok: false, authenticated: false, url, via: "mgmt-path" });
   }
   const token = window.Pan && window.Pan.st && window.Pan.st.st && window.Pan.st.st.st0;
-  const hasToken =
-    (typeof token === "string" && token) || /window\.Pan\.st\.st\.st[0-9]+\s=\s"(\w+)"/.test(html);
-  if (!hasToken) {
-    return { ok: false, authenticated: false, url, via: "no-token" };
+  const hasSt0 =
+    (typeof token === "string" && token) || /window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(html);
+  if (!hasSt0) {
+    return Promise.resolve({ ok: false, authenticated: false, url, via: "no-token" });
   }
 
   const origin = String(location.origin || "");
-  let iframe = document.getElementById("__pano_ka_iframe");
-  if (!iframe) {
-    iframe = document.createElement("iframe");
-    iframe.id = "__pano_ka_iframe";
-    iframe.title = "panorama-keepalive";
-    iframe.setAttribute("aria-hidden", "true");
-    iframe.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden;pointer-events:none";
-    (document.documentElement || document.body).appendChild(iframe);
-  }
-  // Cache-bust so the browser actually loads a management UI document again.
-  iframe.src = `${origin}/php/?_ka=${Date.now()}`;
-  return { ok: true, authenticated: true, url, via: "iframe-php" };
+  const paths = [`/php/?_ka=${Date.now()}`, `/?_ka=${Date.now()}`];
+  return (async () => {
+    for (const p of paths) {
+      try {
+        const res = await fetch(`${origin}${p}`, {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+          redirect: "follow",
+          headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+        });
+        const text = await res.text();
+        const finalUrl = String(res.url || `${origin}${p}`);
+        if (/\/php\/login\.php|\/php\/logout\.php/i.test(finalUrl)) {
+          return { ok: false, authenticated: false, url: finalUrl, via: "fetch-login" };
+        }
+        if (/logged out due to inactivity|you have been logged out/i.test(text)) {
+          return { ok: false, authenticated: false, url: finalUrl, via: "fetch-idle-logout" };
+        }
+        if (/window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(text) || (window.Pan && window.Pan.st && window.Pan.st.st && window.Pan.st.st.st0)) {
+          return { ok: true, authenticated: true, url: finalUrl, via: "fetch-php" };
+        }
+      } catch {
+        /* try next path */
+      }
+    }
+    // Still logged in in this tab even if fetch bodies were odd — count as ok touch attempt.
+    return { ok: true, authenticated: true, url, via: "token-only" };
+  })();
 }
 
-/** Read-only probe for recognition (no iframe). */
+/** Read-only probe for recognition. Authenticated = st0 only (login pages use st10). */
 function panOsTabProbeFunc() {
   const url = String(location.href || "");
   const html = String(document.documentElement?.outerHTML || "");
   if (/logged out due to inactivity|you have been logged out/i.test(html)) {
     return { ok: true, authenticated: false, url, via: "idle-logout" };
   }
+  const path = String(location.pathname || "").replace(/\/+$/, "") || "/";
+  if (path === "/php/login.php" || path === "/php/logout.php") {
+    return { ok: true, authenticated: false, url, via: "mgmt-path" };
+  }
   const token = window.Pan && window.Pan.st && window.Pan.st.st && window.Pan.st.st.st0;
   if (typeof token === "string" && token) {
     return { ok: true, authenticated: true, url, via: "token" };
   }
-  const hasToken = /window\.Pan\.st\.st\.st[0-9]+\s=\s"(\w+)"/.test(html);
-  if (hasToken) return { ok: true, authenticated: true, url, via: "html" };
-  const path = String(location.pathname || "").replace(/\/+$/, "") || "/";
-  if (path === "/php/login.php" || path === "/php/logout.php") {
-    return { ok: true, authenticated: false, url, via: "mgmt-path" };
+  if (/window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(html)) {
+    return { ok: true, authenticated: true, url, via: "html" };
+  }
+  if (/window\.Pan\.st\.st\.st[0-9]+\s=\s"([^"]+)"/.test(html)) {
+    return { ok: true, authenticated: false, url, via: "pan-html-not-logged-in" };
   }
   return { ok: false, authenticated: false, url };
 }
@@ -1060,6 +1081,19 @@ async function maybeAutoEnableFromTabUrl(url) {
   }
 }
 
+async function clearProbeMiss(host) {
+  const key = normalizeHost(host);
+  if (!key) return;
+  const misses = await getProbeMisses();
+  if (!misses[key]) return;
+  delete misses[key];
+  try {
+    await chrome.storage.session.set({ [SESSION_PROBE_MISS_KEY]: misses });
+  } catch {
+    /* ignore */
+  }
+}
+
 async function maybeRecognizePanFirewallFromTabUrl(url, tabId) {
   await sessionReady;
   const state = await storageGet();
@@ -1072,19 +1106,21 @@ async function maybeRecognizePanFirewallFromTabUrl(url, tabId) {
   const skip = await getAutoEnableSkip();
   if (skip[host]) return;
   if (autoEnableInFlight.has(host)) return;
-  // Known PAN mgmt URL (login/logout) — wait for a logged-in session; do not black-hole.
+  // Known PAN mgmt URL (login/logout) or an open tab — wait for login; do not black-hole.
   const knownMgmt = isPanOsMgmtUrl(url);
   const misses = await getProbeMisses();
   const missAt = Number(misses[host] || 0);
-  if (!knownMgmt && missAt && Date.now() - missAt < 15 * 60 * 1000) return;
+  if (!knownMgmt && !tabId && missAt && Date.now() - missAt < 15 * 60 * 1000) return;
+  if (tabId) await clearProbeMiss(host);
   if (!(await hasHostPermissions([host]))) return;
   autoEnableInFlight.add(host);
   try {
     const probe = await probePanOsHost(host, tabId);
     if (!probe.ok) {
-      if (!knownMgmt) await markProbeMiss(host);
+      if (!knownMgmt && !tabId) await markProbeMiss(host);
       return;
     }
+    // Only st0 (logged-in) enables keep-alive; login.php is recognized but waits.
     if (!probe.authenticated) return;
     await enableEphemeralFirewall(host, { report: false });
   } catch {

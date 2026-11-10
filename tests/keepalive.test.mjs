@@ -24,6 +24,7 @@ import {
   matchConfiguredHostFromTab,
   hostFromTabUrl,
   looksLikePanOsUi,
+  hasPanOsServerToken,
   isPanOsLoginUrl,
   isPanOsMgmtUrl,
   isHostKeepAliveActive,
@@ -195,11 +196,14 @@ describe("PAN firewall recognition", () => {
     assert.equal(isPanOsMgmtUrl("https://example.com/php/login.php.bak"), false);
 
     assert.equal(looksLikePanOsUi("https://10.1.2.3/", 'window.Pan.st.st.st0 = "abc"'), true);
+    assert.equal(looksLikePanOsUi("https://10.1.2.3/", 'window.Pan.st.st.st10 = "login-csrf"'), true);
     assert.equal(looksLikePanOsUi("https://10.1.2.3/php/login.php", "<html></html>"), true);
     assert.equal(looksLikePanOsUi("https://10.1.2.3/php/logout.php?vl=2", "<html></html>"), true);
     assert.equal(looksLikePanOsUi("https://example.com/php/", "<form name='passwd'>Log In</form>"), false);
     assert.equal(looksLikePanOsUi("https://example.com/login.php", "<html>Palo Alto Networks</html>"), false);
     assert.equal(looksLikePanOsUi("https://example.com/", "<html>hello</html>"), false);
+    assert.equal(hasPanOsServerToken('window.Pan.st.st.st0 = "abc"'), true);
+    assert.equal(hasPanOsServerToken('window.Pan.st.st.st10 = "login-csrf"'), false);
   });
 
   it("keeps ephemeral hosts active until manually turned off", () => {

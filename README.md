@@ -4,7 +4,7 @@ Browser extension (Edge / Chrome / Firefox) that quietly refreshes an existing P
 
 Uses cookies already in the browser. Does **not** store a password.
 
-Current version: **0.1.21**
+Current version: **0.1.22**
 
 ## Share / install
 
@@ -41,7 +41,7 @@ After a code update, click **Reload** on the extension card.
 
 - **Panorama:** background `GET` of the UI (`/` and `/php/`)
 - **SCM:** pokes an SCM tab (opens one in the background if needed)
-- **Ephemeral firewall:** refreshes `/php/` in a hidden iframe inside a real tab (PAN admin Idle only resets on management UI page refresh; a plain background GET is not enough)
+- **Ephemeral firewall:** same-origin fetch of `/php/` inside a logged-in UI tab (PAN sends `X-Frame-Options: DENY`, so iframes cannot keep the session). Recognition needs a logged-in session (`st0` ServerToken) — the login page alone will not auto-enable
 - Closing the browser clears Active checks and ephemeral firewalls; permanent hosts/aliases/intervals stay
 - Does not beat Max Session Time or Duo lifetime
 
