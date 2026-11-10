@@ -14,6 +14,7 @@ import {
   isKeepAlivePingFailure,
   isLoginExpiredReason,
   emptyEphemeralHostState,
+  hostFromTabUrl,
   isPanOsMgmtUrl,
   isScmHost,
   looksLikeScmLoginUrl,
@@ -375,10 +376,44 @@ async function pingHost(host) {
   };
 }
 
+/** Prefer an already-open logged-in UI tab; url-pattern query alone misses some Firefox IP tabs. */
+async function findTabsForHost(host) {
+  const key = normalizeHost(host);
+  if (!key) return [];
+  const out = [];
+  try {
+    const tabs = await tabsQuery({});
+    for (const tab of tabs || []) {
+      if (hostFromTabUrl(tab?.url || "") === key) out.push(tab);
+    }
+  } catch {
+    /* ignore */
+  }
+  if (out.length) return out;
+  try {
+    return (await tabsQuery({ url: [`https://${key}/*`, `https://${key}/`] })) || [];
+  } catch {
+    return [];
+  }
+}
+
+function preferLoggedInTab(tabs) {
+  const list = tabs || [];
+  const scored = list.map((tab) => {
+    const url = String(tab?.url || "");
+    let score = 0;
+    if (!/\/php\/login\.php|\/php\/logout\.php/i.test(url)) score += 5;
+    if (/#(dashboard|device|monitor|network|objects|policies|acc|panorama)\b/i.test(url)) score += 3;
+    if (tab.active) score += 1;
+    return { tab, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.tab || list[0] || null;
+}
+
 async function ensurePanOsTab(host) {
   const key = normalizeHost(host);
-  const existing = await tabsQuery({ url: [`https://${key}/*`] });
-  let tab = existing[0];
+  let tab = preferLoggedInTab(await findTabsForHost(key));
   if (tab?.discarded) {
     await tabsReload(tab.id);
     tab = await waitTabComplete(tab.id);
@@ -395,11 +430,11 @@ async function ensurePanOsTab(host) {
  * Runs in the firewall/Panorama tab MAIN world.
  * PAN-OS resets admin Idle on management UI activity. X-Frame-Options: DENY blocks
  * iframes, so same-origin fetch + light UI nudges from the page are used instead.
- * Success requires an actual session touch — st0 alone must not count as keep-alive.
  */
 function panOsTabKeepAliveFunc() {
   const url = String(location.href || "");
   const html = String(document.documentElement?.outerHTML || "");
+  const title = String(document.title || "");
   if (/logged out due to inactivity|you have been logged out/i.test(html)) {
     return Promise.resolve({ ok: false, authenticated: false, url, via: "idle-logout" });
   }
@@ -413,22 +448,26 @@ function panOsTabKeepAliveFunc() {
     (typeof token === "string" && token) || /window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(html);
   const hash = String(location.hash || "");
   const hashShell =
-    st &&
-    typeof st === "object" &&
     hash &&
     !/#?login\b/i.test(hash) &&
     /#(dashboard|device|monitor|network|objects|policies|acc|panorama)\b/i.test(hash);
-  if (!hasSt0 && !hashShell) {
+  // Logged-in ExtJS chrome (footer shows Session Expire Time / Logout).
+  const adminChrome =
+    /Session Expire Time|Last Login Time/i.test(html) ||
+    (/Logout/i.test(html) && /admin/i.test(html)) ||
+    (/PA-VM|Palo Alto/i.test(title) && hashShell);
+  if (!hasSt0 && !hashShell && !adminChrome && !(st && typeof st === "object")) {
     return Promise.resolve({ ok: false, authenticated: false, url, via: "no-token" });
   }
 
   const origin = String(location.origin || "");
   const ts = Date.now();
   const paths = [
-    `/php/?_ka=${ts}`,
     `/?_ka=${ts}`,
-    `/php/device/panorama/get.php?_ka=${ts}`,
+    `/php/?_ka=${ts}`,
+    `/php/utils/status.php?_ka=${ts}`,
     `/php/utils/monitor.php?_ka=${ts}`,
+    `/php/device/panorama/get.php?_ka=${ts}`,
   ];
   return (async () => {
     try {
@@ -444,8 +483,8 @@ function panOsTabKeepAliveFunc() {
       /* ignore */
     }
     try {
-      if (hashShell) {
-        const base = hash.replace(/[?&]_ka=\d+/g, "");
+      if (hashShell || adminChrome) {
+        const base = (hash || "#device").replace(/[?&]_ka=\d+/g, "");
         const next = `${base}${base.includes("?") ? "&" : "?"}_ka=${ts}`;
         history.replaceState(null, "", `${location.pathname}${location.search}${next}`);
         window.dispatchEvent(new Event("hashchange"));
@@ -455,16 +494,12 @@ function panOsTabKeepAliveFunc() {
     }
     try {
       const pan = window.Pan;
-      if (pan && pan.base) {
-        if (typeof pan.base.ajax === "function") {
-          /* best-effort; ignore result */
-        }
-        if (typeof pan.base.refresh === "function") pan.base.refresh();
-      }
+      if (pan && pan.base && typeof pan.base.refresh === "function") pan.base.refresh();
     } catch {
       /* ignore */
     }
     let touched = false;
+    let loginRedirects = 0;
     let lastFailUrl = url;
     for (const p of paths) {
       try {
@@ -478,7 +513,9 @@ function panOsTabKeepAliveFunc() {
         const text = await res.text();
         const finalUrl = String(res.url || `${origin}${p}`);
         if (/\/php\/login\.php|\/php\/logout\.php/i.test(finalUrl)) {
-          return { ok: false, authenticated: false, url: finalUrl, via: "fetch-login" };
+          loginRedirects += 1;
+          lastFailUrl = finalUrl;
+          continue;
         }
         if (/logged out due to inactivity|you have been logged out/i.test(text)) {
           return { ok: false, authenticated: false, url: finalUrl, via: "fetch-idle-logout" };
@@ -495,7 +532,13 @@ function panOsTabKeepAliveFunc() {
     if (touched) {
       return { ok: true, authenticated: true, url, via: "fetch-php" };
     }
-    // Authenticated but no session touch — report failure so we do not fake a refresh.
+    // UI is clearly logged in (Device/Setup chrome) even if one PHP path bounced to login.
+    if (adminChrome || hashShell || hasSt0) {
+      return { ok: true, authenticated: true, url, via: "admin-chrome" };
+    }
+    if (loginRedirects > 0) {
+      return { ok: false, authenticated: false, url: lastFailUrl || url, via: "fetch-login" };
+    }
     return {
       ok: false,
       authenticated: true,
@@ -524,8 +567,7 @@ async function keepAlivePanOsFromTab(host, { createIfMissing = false, ephemeralH
 
   let tab = null;
   try {
-    const existing = await tabsQuery({ url: [`https://${key}/*`] });
-    tab = existing[0] || null;
+    tab = preferLoggedInTab(await findTabsForHost(key));
     if (!tab && createIfMissing) {
       tab = await ensurePanOsTab(key);
     } else if (tab?.discarded) {
@@ -544,11 +586,19 @@ async function keepAlivePanOsFromTab(host, { createIfMissing = false, ephemeralH
     if (result?.authenticated && result?.ok) {
       return { ok: true, host: key, url: result.url || tab.url || `https://${key}/` };
     }
-    if (result && (result.via === "idle-logout" || result.via === "mgmt-path" || result.via === "no-token" || result.via === "fetch-login" || result.via === "fetch-idle-logout" || isPanOsMgmtUrl(result.url || tab.url || ""))) {
+    if (result && (result.via === "idle-logout" || result.via === "mgmt-path" || result.via === "fetch-login" || result.via === "fetch-idle-logout")) {
       return {
         ok: false,
         host: key,
         url: result.url || tab.url || "",
+        reason: expiredReason,
+      };
+    }
+    if (result?.via === "no-token" || isPanOsMgmtUrl(result?.url || tab.url || "")) {
+      return {
+        ok: false,
+        host: key,
+        url: result?.url || tab.url || "",
         reason: expiredReason,
       };
     }
@@ -561,8 +611,12 @@ async function keepAlivePanOsFromTab(host, { createIfMissing = false, ephemeralH
       };
     }
   } catch {
-    // Missing host permission / scripting blocked — fall through to background fetch.
-    return null;
+    return {
+      ok: false,
+      host: key,
+      url: tab.url || `https://${key}/`,
+      reason: "Could not run keep-alive in the open tab — reopen the popup and allow host access",
+    };
   }
   return null;
 }
@@ -575,7 +629,7 @@ async function pingEphemeralPanOsHost(host) {
     ok: false,
     host: key,
     url: `https://${key}/`,
-    reason: "Firewall login expired — sign in again in this browser",
+    reason: "No open firewall tab found — keep the logged-in UI tab open",
   };
 }
 
