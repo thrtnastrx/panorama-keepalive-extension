@@ -4,7 +4,7 @@ Browser extension (Edge / Chrome / Firefox) that quietly refreshes an existing P
 
 Uses cookies already in the browser. Does **not** store a password.
 
-Current version: **0.1.22**
+Current version: **0.1.23**
 
 ## Share / install
 
@@ -29,13 +29,13 @@ After a code update, click **Reload** on the extension card.
 ## Requirements
 
 - You must already be logged into Panorama, the firewall, or SCM in **this** browser
-- The device needs a TLS certificate the browser trusts. Self-signed or untrusted certs break background refresh (`Failed to fetch`). For ephemeral firewalls, keep-alive can still work if you have accepted the certificate warning and leave a logged-in UI tab open
+- **"Not Secure" / self-signed certs:** background Panorama refresh often fails (`Failed to fetch`). Ephemeral recognize/keep-alive uses the open tab after you have clicked through the warning — leave the logged-in UI tab open
 
 ## Options (popup)
 
 - **Duration** — how long keep-alive runs for permanent hosts (1–24 hours)
 - **Auto-enable** — turn on when you open a matching configured Panorama/SCM tab (host permission must already be allowed)
-- **Recognize a PAN firewall** — detect a logged-in PAN-OS UI (any IP), keep it as an ephemeral row until you turn it off (asks for HTTPS access)
+- **Recognize PAN-OS / Panorama** — detect a logged-in management UI (firewall or Panorama IP/FQDN), keep it as an ephemeral row until you turn it off (asks for HTTPS access)
 
 ## Behavior
 

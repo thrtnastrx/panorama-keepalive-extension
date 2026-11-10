@@ -185,7 +185,29 @@ function isPermanentHost(state, host) {
 async function hasHostPermissions(hosts) {
   const origins = hosts.map(originForHost).filter(Boolean);
   if (!origins.length) return false;
-  return chrome.permissions.contains({ origins });
+  if (await chrome.permissions.contains({ origins })) return true;
+  // Firefox: a granted https://*/* wildcard often fails contains() for a specific host.
+  try {
+    if (await chrome.permissions.contains({ origins: ["https://*/*"] })) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+async function scanOpenTabsForPanFirewall() {
+  const state = await storageGet();
+  if (!state.recognizePanFirewall) return;
+  try {
+    const tabs = await tabsQuery({});
+    for (const tab of tabs || []) {
+      if (tab?.url && tab.id != null) {
+        await maybeRecognizePanFirewallFromTabUrl(tab.url, tab.id);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 function tabsQuery(query) {
@@ -466,17 +488,32 @@ function panOsTabProbeFunc() {
   if (path === "/php/login.php" || path === "/php/logout.php") {
     return { ok: true, authenticated: false, url, via: "mgmt-path" };
   }
-  const token = window.Pan && window.Pan.st && window.Pan.st.st && window.Pan.st.st.st0;
+  const st = window.Pan && window.Pan.st && window.Pan.st.st;
+  const token = st && st.st0;
   if (typeof token === "string" && token) {
     return { ok: true, authenticated: true, url, via: "token" };
   }
   if (/window\.Pan\.st\.st\.st0\s=\s"([^"]+)"/.test(html)) {
     return { ok: true, authenticated: true, url, via: "html" };
   }
+  // Panorama/PAN-OS app shell after login (hash routes like #dashboard) without scraping HTML.
+  const hash = String(location.hash || "");
+  if (
+    st &&
+    typeof st === "object" &&
+    hash &&
+    !/#?login\b/i.test(hash) &&
+    /#(dashboard|device|monitor|network|objects|policies|acc|panorama)\b/i.test(hash)
+  ) {
+    return { ok: true, authenticated: true, url, via: "pan-hash-shell" };
+  }
   if (/window\.Pan\.st\.st\.st[0-9]+\s=\s"([^"]+)"/.test(html)) {
     return { ok: true, authenticated: false, url, via: "pan-html-not-logged-in" };
   }
-  return { ok: false, authenticated: false, url };
+  if (window.Pan && path === "/" && /panorama|palo alto/i.test(String(document.title || ""))) {
+    return { ok: true, authenticated: false, url, via: "pan-title-unconfirmed" };
+  }
+  return { ok: false, authenticated: false, url, title: String(document.title || "") };
 }
 
 async function executePanOsTabScript(tabId, func) {
@@ -1190,6 +1227,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       await sessionReady;
       if (message?.type === "get-state") {
+        await scanOpenTabsForPanFirewall();
         sendResponse({ ok: true, state: await publicState() });
         return;
       }
