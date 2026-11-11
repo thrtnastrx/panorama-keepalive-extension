@@ -12,6 +12,7 @@ const autoEnableEl = document.getElementById("auto-enable");
 const hostsEl = document.getElementById("hosts");
 const emptyEl = document.getElementById("empty");
 const statusEl = document.getElementById("status");
+const versionEl = document.getElementById("version");
 const addTabEl = document.getElementById("add-tab");
 const pingEl = document.getElementById("ping");
 const optionsEl = document.getElementById("options");
@@ -127,6 +128,8 @@ function hideProgress() {
 
 function render(state) {
   lastState = state;
+  const ver = state?.version || chrome.runtime.getManifest()?.version || "";
+  if (versionEl) versionEl.textContent = ver ? `v${ver}` : "";
   hoursEl.value = String(state.hours || 8);
   autoEnableEl.checked = Boolean(state.autoEnableOnTab);
   const rows = Array.isArray(state.rows) ? state.rows : [];
@@ -318,7 +321,12 @@ async function addCurrentTab(permissionPromise) {
   });
   if (!res?.ok) {
     hideProgress();
-    showError(res?.error || "Could not add this tab");
+    const err = String(res?.error || "Could not add this tab");
+    showError(
+      /unknown message/i.test(err)
+        ? "Reload the extension on edge://extensions (Developer mode → Reload), then try Add this tab again"
+        : err,
+    );
     return;
   }
   setProgress({ phase: "done", current: 1, total: 1, host, kind: "connect" });

@@ -4,7 +4,7 @@ Browser extension (Edge / Chrome / Firefox) that quietly refreshes an existing P
 
 Uses cookies already in the browser. Does **not** store a password.
 
-Current version: **0.1.29**
+Current version: **0.1.30**
 
 ## Share / install
 
@@ -24,7 +24,7 @@ Or open the `.xpi` file directly in Firefox.
 4. **Load unpacked** → select this folder (the one with `manifest.json`)
 5. Pin the extension, open **Hosts…**, add Panorama FQDNs, enable keep-alive
 
-After a code update, click **Reload** on the extension card.
+After a code update, click **Reload** on the extension card (required on Edge/Chrome — the popup can update while a stale background worker still runs; that shows **Unknown message** on Add this tab).
 
 ## Requirements
 

@@ -115,10 +115,19 @@ async function setEphemeralHosts(ephemeralHosts) {
   await chrome.storage.session.set({ [SESSION_EPHEMERAL_KEY]: ephemeralHosts || {} });
 }
 
+function extensionVersion() {
+  try {
+    return String(chrome.runtime.getManifest()?.version || "");
+  } catch {
+    return "";
+  }
+}
+
 async function publicState() {
   const state = await storageGet();
   const ephemeralHosts = await getEphemeralHosts();
   return {
+    version: extensionVersion(),
     hours: state.hours,
     hostsText: state.hostsText,
     autoEnableOnTab: state.autoEnableOnTab,
@@ -451,12 +460,15 @@ function panOsTabKeepAliveFunc() {
     hash &&
     !/#?login\b/i.test(hash) &&
     /#(dashboard|device|monitor|network|objects|policies|acc|panorama)\b/i.test(hash);
+  // Older/appliance UI paths like /php/gui/network/dashboard.php
+  const guiShell = /^\/php\/gui\//i.test(path) && !/login/i.test(path);
   // Logged-in ExtJS chrome (footer shows Session Expire Time / Logout).
   const adminChrome =
     /Session Expire Time|Last Login Time/i.test(html) ||
     (/Logout/i.test(html) && /admin/i.test(html)) ||
-    (/PA-VM|Palo Alto/i.test(title) && hashShell);
-  if (!hasSt0 && !hashShell && !adminChrome && !(st && typeof st === "object")) {
+    (/PA-VM|Palo Alto|PA-\d/i.test(title) && (hashShell || guiShell)) ||
+    guiShell;
+  if (!hasSt0 && !hashShell && !adminChrome && !guiShell && !(st && typeof st === "object")) {
     return Promise.resolve({ ok: false, authenticated: false, url, via: "no-token" });
   }
 
@@ -483,7 +495,7 @@ function panOsTabKeepAliveFunc() {
       /* ignore */
     }
     try {
-      if (hashShell || adminChrome) {
+      if (hashShell || (adminChrome && hash)) {
         const base = (hash || "#device").replace(/[?&]_ka=\d+/g, "");
         const next = `${base}${base.includes("?") ? "&" : "?"}_ka=${ts}`;
         history.replaceState(null, "", `${location.pathname}${location.search}${next}`);
@@ -533,8 +545,8 @@ function panOsTabKeepAliveFunc() {
       return { ok: true, authenticated: true, url, via: "fetch-php" };
     }
     // UI is clearly logged in (Device/Setup chrome) even if one PHP path bounced to login.
-    if (adminChrome || hashShell || hasSt0) {
-      return { ok: true, authenticated: true, url, via: "admin-chrome" };
+    if (adminChrome || hashShell || guiShell || hasSt0) {
+      return { ok: true, authenticated: true, url, via: adminChrome || guiShell ? "admin-chrome" : "token" };
     }
     if (loginRedirects > 0) {
       return { ok: false, authenticated: false, url: lastFailUrl || url, via: "fetch-login" };
@@ -1356,7 +1368,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: true, state: await publicState() });
         return;
       }
-      sendResponse({ ok: false, error: "Unknown message" });
+      sendResponse({
+        ok: false,
+        error:
+          "Unknown message — reload this extension on edge://extensions (or about:addons), then try Add this tab again",
+        version: extensionVersion(),
+      });
     } catch (err) {
       sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
