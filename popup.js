@@ -13,7 +13,8 @@ const hostsEl = document.getElementById("hosts");
 const emptyEl = document.getElementById("empty");
 const statusEl = document.getElementById("status");
 const versionEl = document.getElementById("version");
-const addTabEl = document.getElementById("add-tab");
+const addSessionEl = document.getElementById("add-session");
+const addHostsEl = document.getElementById("add-hosts");
 const pingEl = document.getElementById("ping");
 const optionsEl = document.getElementById("options");
 const progressEl = document.getElementById("progress");
@@ -280,7 +281,7 @@ async function refreshActiveTabInfo() {
 }
 
 async function load() {
-  // Cache the active tab before the user clicks Add this tab (permission needs a click gesture).
+  // Cache the active tab before Add this session / Add this tab to hosts (permission needs a click gesture).
   const tabReady = refreshActiveTabInfo();
   const res = await send({ type: "get-state" });
   await tabReady;
@@ -291,8 +292,9 @@ async function load() {
 /**
  * @param {Promise<boolean>|null} permissionPromise must be started in the click handler
  *   (Firefox: permissions.request after await tabs.query fails user-input-handler check).
+ * @param {{ permanent?: boolean }} opts permanent → Hosts list; else session-only
  */
-async function addCurrentTab(permissionPromise) {
+async function addCurrentTab(permissionPromise, { permanent = false } = {}) {
   showError("");
   let { host, tabId, title } = activeTabInfo;
   if (!host) {
@@ -301,7 +303,7 @@ async function addCurrentTab(permissionPromise) {
   }
   const granted = await (permissionPromise ?? Promise.resolve(false));
   if (!granted) {
-    showError(`Allow access to ${host}, then Add this tab again`);
+    showError(`Allow access to ${host}, then try again`);
     return;
   }
   setProgress({
@@ -313,7 +315,7 @@ async function addCurrentTab(permissionPromise) {
     kind: "connect",
   });
   const res = await send({
-    type: "add-ephemeral-tab",
+    type: permanent ? "add-permanent-tab" : "add-ephemeral-tab",
     host,
     tabId,
     title: title || "",
@@ -324,7 +326,7 @@ async function addCurrentTab(permissionPromise) {
     const err = String(res?.error || "Could not add this tab");
     showError(
       /unknown message/i.test(err)
-        ? "Reload the extension on edge://extensions (Developer mode → Reload), then try Add this tab again"
+        ? "Reload the extension on edge://extensions (Developer mode → Reload), then try again"
         : err,
     );
     return;
@@ -332,6 +334,25 @@ async function addCurrentTab(permissionPromise) {
   setProgress({ phase: "done", current: 1, total: 1, host, kind: "connect" });
   render(res.state);
   window.setTimeout(hideProgress, 700);
+}
+
+function bindAddButton(buttonEl, { permanent }) {
+  buttonEl.addEventListener("click", () => {
+    // Must call permissions.request in this turn — do not await tabs.query first.
+    const host = activeTabInfo.host;
+    const permissionPromise = host ? requestHostPermissions([host]) : Promise.resolve(false);
+    void (async () => {
+      buttonEl.disabled = true;
+      try {
+        await addCurrentTab(permissionPromise, { permanent });
+      } catch (err) {
+        hideProgress();
+        showError(err instanceof Error ? err.message : String(err));
+      } finally {
+        buttonEl.disabled = false;
+      }
+    })();
+  });
 }
 
 async function saveAlias(host, alias) {
@@ -430,22 +451,8 @@ chrome.runtime.onMessage.addListener((message) => {
   setProgress(message);
 });
 
-addTabEl.addEventListener("click", () => {
-  // Must call permissions.request in this turn — do not await tabs.query first.
-  const host = activeTabInfo.host;
-  const permissionPromise = host ? requestHostPermissions([host]) : Promise.resolve(false);
-  void (async () => {
-    addTabEl.disabled = true;
-    try {
-      await addCurrentTab(permissionPromise);
-    } catch (err) {
-      hideProgress();
-      showError(err instanceof Error ? err.message : String(err));
-    } finally {
-      addTabEl.disabled = false;
-    }
-  })();
-});
+bindAddButton(addSessionEl, { permanent: false });
+bindAddButton(addHostsEl, { permanent: true });
 
 pingEl.addEventListener("click", () => {
   void (async () => {

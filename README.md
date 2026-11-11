@@ -4,7 +4,7 @@ Browser extension (Edge / Chrome / Firefox) that quietly refreshes an existing P
 
 Uses cookies already in the browser. Does **not** store a password.
 
-Current version: **0.1.30**
+Current version: **0.1.31**
 
 ## Share / install
 
@@ -35,17 +35,18 @@ After a code update, click **Reload** on the extension card (required on Edge/Ch
 
 - **Duration** — how long keep-alive runs for saved hosts (1–24 hours)
 - **Auto-enable** — turn on when you open a matching **saved** Panorama/SCM tab (host permission must already be allowed)
-- **Add this tab** — add the active browser tab as a **session-only** keep-alive (not saved under Hosts; cleared when the browser closes). Use this for firewall IPs / one-off Panorama tabs
-- **Hosts…** — permanent host list (survives browser restart; Active still clears on close)
+- **Add this session** — session-only keep-alive for the active tab (not saved under Hosts; cleared when the browser closes)
+- **Add this tab to hosts** — save the active tab under Hosts and enable keep-alive for **Duration**
+- **Hosts…** — edit the permanent host list (survives browser restart; Active still clears on close)
 
 ## Behavior
 
-- **Saved Panorama hosts:** background `GET` of the UI (`/` and `/php/`), or in-tab refresh when a tab is open
+- **Saved hosts:** background `GET` of the UI (`/` and `/php/`), or in-tab refresh when a tab is open
 - **SCM:** pokes an SCM tab (opens one in the background if needed)
-- **Session tabs (Add this tab):** keep-alive runs inside the open UI tab (same-origin fetch + light UI nudge). Not written to the Hosts database
+- **Add this session:** keep-alive runs inside the open UI tab; not written to Hosts
 - First refresh fires within ~1 minute (not after a full interval) so a 5‑minute Idle Timeout is not lost to the first alarm
 - Use a refresh interval **shorter** than the device Idle Timeout
-- Closing the browser clears Active checks and session tabs; permanent hosts/aliases/intervals stay
+- Closing the browser clears Active checks and sessions; permanent hosts/aliases/intervals stay
 - Does not beat Max Session Time or Duo lifetime
 
 ## Privacy

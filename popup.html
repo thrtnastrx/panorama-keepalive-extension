@@ -239,7 +239,7 @@
     <main>
       <div class="popup-top">
         <h1>Panorama Keep-Alive</h1>
-        <p>Keep a logged-in Panorama or firewall tab alive. Closing the browser clears Active and session tabs; saved hosts stay.</p>
+        <p>Keep a logged-in Panorama or firewall tab alive. Closing the browser clears Active and sessions; saved hosts stay.</p>
         <label class="row" for="hours">
           Duration
           <select id="hours">
@@ -264,11 +264,12 @@
       </div>
       <div class="host-scroll">
         <div id="hosts"></div>
-        <p id="empty" hidden>Add saved hosts in Options, or use Add this tab for a session-only keep-alive.</p>
+        <p id="empty" hidden>Use Add this session, Add this tab to hosts, or Hosts…</p>
       </div>
       <div class="popup-bottom">
-        <div class="actions">
-          <button type="button" id="add-tab">Add this tab</button>
+        <div class="actions" style="flex-wrap: wrap">
+          <button type="button" id="add-session">Add this session</button>
+          <button type="button" id="add-hosts">Add this tab to hosts</button>
           <button type="button" id="ping">Refresh now</button>
           <button type="button" id="options">Hosts…</button>
         </div>

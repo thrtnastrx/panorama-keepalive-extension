@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Panorama Keep-Alive",
   "short_name": "Pano Keep-Alive",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "description": "Quietly refresh your Panorama web login to avoid idle-timer logouts",
   "icons": {
     "16": "icons/icon16.png",

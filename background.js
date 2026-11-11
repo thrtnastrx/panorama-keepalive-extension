@@ -1077,6 +1077,13 @@ async function disableHostKeepAlive(host, { hours } = {}) {
   return { ok: true, state: await publicState() };
 }
 
+function aliasFromTabTitle(alias, fallback = "") {
+  const fromTitle = sanitizeAlias(alias);
+  if (fromTitle && !/^login$/i.test(fromTitle)) return fromTitle;
+  return sanitizeAlias(fallback) || "";
+}
+
+/** Session-only keep-alive — not written to Hosts; cleared when the browser closes. */
 async function enableEphemeralTab(host, { intervalMinutes, alias = "", report = false } = {}) {
   const key = normalizeHost(host);
   if (!key) return { ok: false, error: "Unknown host" };
@@ -1084,14 +1091,7 @@ async function enableEphemeralTab(host, { intervalMinutes, alias = "", report = 
     return { ok: false, error: "Allow access to this tab’s host when prompted" };
   }
   const state = await storageGet();
-  if (isPermanentHost(state, key)) {
-    return enableHostKeepAlive(key, {
-      hours: state.hours,
-      intervalMinutes,
-      report,
-    });
-  }
-  if (isScmHost(key)) {
+  if (isPermanentHost(state, key) || isScmHost(key)) {
     return enableHostKeepAlive(key, {
       hours: state.hours,
       intervalMinutes,
@@ -1100,11 +1100,7 @@ async function enableEphemeralTab(host, { intervalMinutes, alias = "", report = 
   }
   const ephemeralHosts = await getEphemeralHosts();
   const prev = ephemeralHosts[key] || {};
-  const fromTitle = sanitizeAlias(alias);
-  const nextAlias =
-    (fromTitle && !/^login$/i.test(fromTitle) ? fromTitle : "") ||
-    sanitizeAlias(prev.alias) ||
-    "This tab";
+  const nextAlias = aliasFromTabTitle(alias, prev.alias) || "This session";
   ephemeralHosts[key] = {
     ...emptyEphemeralHostState(),
     ...prev,
@@ -1125,6 +1121,43 @@ async function enableEphemeralTab(host, { intervalMinutes, alias = "", report = 
     /* row stays in session list even if the first refresh throws */
   }
   return { ok: true, state: await publicState() };
+}
+
+/** Save the active tab host under Hosts and enable keep-alive for Duration. */
+async function addPermanentTab(host, { hours, intervalMinutes, alias = "", report = true } = {}) {
+  const key = normalizeHost(host);
+  if (!key) return { ok: false, error: "Unknown host" };
+  if (!(await hasSpecificHostPermissions([key]))) {
+    return { ok: false, error: "Allow access to this tab’s host when prompted" };
+  }
+  const state = await storageGet();
+  const ephemeralHosts = await getEphemeralHosts();
+  const nextAlias =
+    aliasFromTabTitle(alias, state.hosts?.[key]?.alias || ephemeralHosts[key]?.alias || "") || "";
+
+  if (ephemeralHosts[key]) {
+    delete ephemeralHosts[key];
+    await setEphemeralHosts(ephemeralHosts);
+  }
+
+  let hostsText = String(state.hostsText || "");
+  const list = parseHostList(hostsText);
+  if (!list.includes(key)) {
+    const line = nextAlias ? `${key} ${nextAlias}` : key;
+    hostsText = [hostsText.trim(), line].filter(Boolean).join("\n");
+  }
+  const hosts = mergeHostMap(hostsText, state.hosts);
+  if (nextAlias) {
+    hosts[key] = { ...(hosts[key] || {}), alias: nextAlias };
+  }
+  hostsText = serializeHostsText(hostsText, hosts);
+  await storageSet({ hostsText, hosts });
+
+  return enableHostKeepAlive(key, {
+    hours: hours ?? state.hours,
+    intervalMinutes,
+    report,
+  });
 }
 
 async function maybeAutoEnableFromTabUrl(url) {
@@ -1241,6 +1274,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         sendResponse(
           await enableEphemeralTab(host, {
+            intervalMinutes: message.intervalMinutes,
+            alias: message.title || message.alias || "",
+            report: true,
+          }),
+        );
+        return;
+      }
+      if (message?.type === "add-permanent-tab") {
+        const host = normalizeHost(message.host);
+        if (!host) {
+          sendResponse({ ok: false, error: "Open an https:// Panorama or firewall tab first" });
+          return;
+        }
+        sendResponse(
+          await addPermanentTab(host, {
+            hours: message.hours,
             intervalMinutes: message.intervalMinutes,
             alias: message.title || message.alias || "",
             report: true,
