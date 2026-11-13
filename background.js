@@ -323,32 +323,12 @@ async function isEphemeralHost(host) {
   return Boolean(row?.ephemeral || row?.untilManual);
 }
 
-async function pingHost(host) {
+/** Background cookie fetch — works for trusted certs (original manual-host path). */
+async function pingPanOsBackground(host) {
   const key = normalizeHost(host);
-  if (isScmHost(key)) return pingScmHost(key);
-
-  const ephemeral = await isEphemeralHost(key);
-  // Prefer in-tab keep-alive whenever a UI tab exists (self-signed certs + real Idle reset).
-  // Session rows must NEVER createIfMissing — closing the tab should end the session, not spawn another.
-  const tabPing = await keepAlivePanOsFromTab(key, {
-    createIfMissing: false,
-    ephemeralHint: ephemeral,
-  });
-  if (tabPing) return tabPing;
-  if (ephemeral) {
-    await endEphemeralSession(key);
-    return {
-      ok: false,
-      host: key,
-      url: `https://${key}/`,
-      reason: "Session tab closed — Add this session again when you reopen it",
-    };
-  }
-
   const paths = ["/", "/php/"];
   let lastUrl = "";
   let lastStatus = 0;
-  let lastBody = "";
   let sawResponse = false;
   let fetchFailed = false;
   for (const path of paths) {
@@ -363,9 +343,9 @@ async function pingHost(host) {
       sawResponse = true;
       lastUrl = res.url || `https://${key}${path}`;
       lastStatus = res.status;
-      lastBody = await res.text();
+      const lastBody = await res.text();
       if (isAuthenticatedPage(lastUrl, lastStatus, lastBody)) {
-        return { ok: true, host: key, url: lastUrl };
+        return { ok: true, host: key, url: lastUrl, via: "background" };
       }
     } catch {
       fetchFailed = true;
@@ -376,6 +356,7 @@ async function pingHost(host) {
       ok: false,
       host: key,
       url: lastUrl || `https://${key}/`,
+      via: "background",
       reason: "Failed to fetch — open the host tab (trust the cert) or allow host permission",
     };
   }
@@ -383,8 +364,52 @@ async function pingHost(host) {
     ok: false,
     host: key,
     url: lastUrl,
+    via: "background",
     reason: lastStatus >= 400 ? `HTTP ${lastStatus}` : "Panorama login expired — sign in again in this browser",
   };
+}
+
+async function pingHost(host) {
+  const key = normalizeHost(host);
+  if (isScmHost(key)) return pingScmHost(key);
+
+  const ephemeral = await isEphemeralHost(key);
+
+  // Session-only: open tab required; never spawn a replacement tab.
+  if (ephemeral) {
+    const tabPing = await keepAlivePanOsFromTab(key, {
+      createIfMissing: false,
+      ephemeralHint: true,
+    });
+    if (tabPing?.ok) return tabPing;
+    if (!tabPing) {
+      await endEphemeralSession(key);
+      return {
+        ok: false,
+        host: key,
+        url: `https://${key}/`,
+        reason: "Session tab closed — Add this session again when you reopen it",
+      };
+    }
+    return tabPing;
+  }
+
+  // Permanent hosts: background fetch first (valid-cert path that used to work), then in-tab
+  // for self-signed / Not Secure when background cannot connect.
+  const bg = await pingPanOsBackground(key);
+  if (bg.ok) return bg;
+
+  const tabPing = await keepAlivePanOsFromTab(key, {
+    createIfMissing: false,
+    ephemeralHint: false,
+  });
+  if (tabPing?.ok) return tabPing;
+
+  if (bg.via === "background" && bg.reason && !/failed to fetch/i.test(bg.reason)) {
+    return bg;
+  }
+  if (tabPing) return tabPing;
+  return bg;
 }
 
 /** Prefer an already-open logged-in UI tab; url-pattern query alone misses some Firefox IP tabs. */
@@ -546,16 +571,14 @@ function panOsTabKeepAliveFunc() {
     if (touched) {
       return { ok: true, authenticated: true, url, via: "fetch-php" };
     }
-    // UI is clearly logged in (Device/Setup chrome) even if one PHP path bounced to login.
-    if (adminChrome || hashShell || guiShell || hasSt0) {
-      return { ok: true, authenticated: true, url, via: adminChrome || guiShell ? "admin-chrome" : "token" };
-    }
-    if (loginRedirects > 0) {
+    // Do NOT treat "looks logged in" as a successful keep-alive — that skipped real refreshes
+    // for permanent hosts and let Idle Timeout win. Caller may fall through to background fetch.
+    if (loginRedirects > 0 && !adminChrome && !hashShell && !guiShell && !hasSt0) {
       return { ok: false, authenticated: false, url: lastFailUrl || url, via: "fetch-login" };
     }
     return {
       ok: false,
-      authenticated: true,
+      authenticated: Boolean(adminChrome || hashShell || guiShell || hasSt0),
       url: lastFailUrl || url,
       via: "no-touch",
       reason: "Could not refresh session from tab",
