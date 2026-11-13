@@ -329,17 +329,19 @@ async function pingHost(host) {
 
   const ephemeral = await isEphemeralHost(key);
   // Prefer in-tab keep-alive whenever a UI tab exists (self-signed certs + real Idle reset).
+  // Session rows must NEVER createIfMissing — closing the tab should end the session, not spawn another.
   const tabPing = await keepAlivePanOsFromTab(key, {
-    createIfMissing: ephemeral,
+    createIfMissing: false,
     ephemeralHint: ephemeral,
   });
   if (tabPing) return tabPing;
   if (ephemeral) {
+    await endEphemeralSession(key);
     return {
       ok: false,
       host: key,
       url: `https://${key}/`,
-      reason: "Firewall login expired — sign in again in this browser",
+      reason: "Session tab closed — Add this session again when you reopen it",
     };
   }
 
@@ -635,13 +637,14 @@ async function keepAlivePanOsFromTab(host, { createIfMissing = false, ephemeralH
 
 async function pingEphemeralPanOsHost(host) {
   const key = normalizeHost(host);
-  const tabPing = await keepAlivePanOsFromTab(key, { createIfMissing: true, ephemeralHint: true });
+  const tabPing = await keepAlivePanOsFromTab(key, { createIfMissing: false, ephemeralHint: true });
   if (tabPing) return tabPing;
+  await endEphemeralSession(key);
   return {
     ok: false,
     host: key,
     url: `https://${key}/`,
-    reason: "No open firewall tab found — keep the logged-in UI tab open",
+    reason: "Session tab closed — Add this session again when you reopen it",
   };
 }
 
@@ -699,8 +702,8 @@ async function writeHostRow(state, ephemeralHosts, host, nextRow, ephemeral) {
 }
 
 /**
- * Apply ping result. Session (ephemeral) rows stay in the list until the user turns
- * them off — a failed first connect must not make "Add this tab" vanish.
+ * Apply ping result. Session rows are removed when the tab is closed or keep-alive
+ * is turned off; other refresh failures keep the row with an error note.
  */
 function rowAfterPing(row, result, { ephemeral = false } = {}) {
   if (result?.ok) {
@@ -711,6 +714,9 @@ function rowAfterPing(row, result, { ephemeral = false } = {}) {
     };
   }
   const reason = result?.reason || "Refresh failed";
+  if (ephemeral && /session tab closed/i.test(reason)) {
+    return null;
+  }
   if (isLoginExpiredReason(reason)) {
     if (ephemeral) {
       return {
@@ -841,6 +847,18 @@ async function refreshHost(host, { report = false, kind = "refresh" } = {}) {
   const state = await storageGet();
   const ephemeralHosts = await getEphemeralHosts();
   const { row, ephemeral } = rowForHost(state, ephemeralHosts, key);
+  // User turned keep-alive off (or session ended) — do not open tabs mid-flight.
+  if (ephemeral && !ephemeralHosts[key]) {
+    const alarm = alarmNameForHost(key);
+    if (alarm) {
+      try {
+        await chrome.alarms.clear(alarm);
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: true, state: await publicState() };
+  }
   const progress = progressKind(kind);
   if (report) {
     emitHostProgress(
@@ -984,14 +1002,33 @@ async function anyOpenTabForHost(host) {
   const key = normalizeHost(host);
   if (!key) return false;
   try {
-    const tabs = await tabsQuery({ url: [`https://${key}/*`] });
-    return (tabs || []).some((tab) => {
-      const matched = matchConfiguredHostFromTab(tab.url || "", [key]);
-      return Boolean(matched);
-    });
+    const tabs = await findTabsForHost(key);
+    return tabs.length > 0;
   } catch {
     return false;
   }
+}
+
+/** Drop a session-only host and its alarm; do not reopen tabs. */
+async function endEphemeralSession(host) {
+  const key = normalizeHost(host);
+  if (!key) return;
+  const ephemeralHosts = await getEphemeralHosts();
+  if (!ephemeralHosts[key]) return;
+  delete ephemeralHosts[key];
+  await setEphemeralHosts(ephemeralHosts);
+  await setAutoEnableSkip(key, true);
+  const name = alarmNameForHost(key);
+  if (name) {
+    try {
+      await chrome.alarms.clear(name);
+    } catch {
+      /* ignore */
+    }
+  }
+  const state = await storageGet();
+  await scheduleFromState({ ...state, ephemeralHosts });
+  await syncBadge({ ...state, ephemeralHosts });
 }
 
 const autoEnableInFlight = new Set();
@@ -1050,6 +1087,15 @@ async function disableHostKeepAlive(host, { hours } = {}) {
   const state = await storageGet();
   const ephemeralHosts = await getEphemeralHosts();
   if (!key) return { ok: false, error: "Unknown host" };
+  const alarm = alarmNameForHost(key);
+  if (alarm) {
+    try {
+      await chrome.alarms.clear(alarm);
+    } catch {
+      /* ignore */
+    }
+  }
+  await setAutoEnableSkip(key, true);
   if (isPermanentHost(state, key)) {
     const row = state.hosts[key] || {};
     const nextHours = clampHours(hours ?? state.hours);
@@ -1061,17 +1107,18 @@ async function disableHostKeepAlive(host, { hours } = {}) {
       lastError: isKeepAlivePingFailure(row.lastError) ? row.lastError : REASON_TURNED_OFF,
     };
     await storageSet({ hours: nextHours, hosts: state.hosts });
-    await setAutoEnableSkip(key, true);
     await scheduleFromState({ ...state, hours: nextHours, ephemeralHosts });
     await syncBadge({ ...state, hours: nextHours, ephemeralHosts });
     return { ok: true, state: await publicState() };
   }
   if (!ephemeralHosts[key]) {
-    return { ok: false, error: "Unknown host" };
+    // Already gone (e.g. tab-close ended the session) — still report success.
+    await scheduleFromState({ ...state, ephemeralHosts });
+    await syncBadge({ ...state, ephemeralHosts });
+    return { ok: true, state: await publicState() };
   }
   delete ephemeralHosts[key];
   await setEphemeralHosts(ephemeralHosts);
-  await setAutoEnableSkip(key, true);
   await scheduleFromState({ ...state, ephemeralHosts });
   await syncBadge({ ...state, ephemeralHosts });
   return { ok: true, state: await publicState() };
@@ -1240,6 +1287,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener((_tabId, _removeInfo) => {
   void (async () => {
     await sessionReady;
+    const ephemeralHosts = await getEphemeralHosts();
+    for (const host of Object.keys(ephemeralHosts)) {
+      if (!(await anyOpenTabForHost(host))) {
+        await endEphemeralSession(host);
+      }
+    }
     const state = await storageGet();
     if (!state.autoEnableOnTab) return;
     for (const host of parseHostList(state.hostsText)) {

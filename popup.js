@@ -253,7 +253,7 @@ function render(state) {
       const note = document.createElement("span");
       note.className = "host-note";
       note.textContent = row.ephemeral
-        ? "Session only — not saved in Hosts"
+        ? "Session only — ends if you close the tab"
         : "Until you turn it off";
       item.append(note);
     } else if (row.enabled && row.until) {

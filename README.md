@@ -4,7 +4,7 @@ Browser extension (Edge / Chrome / Firefox) that quietly refreshes an existing P
 
 Uses cookies already in the browser. Does **not** store a password.
 
-Current version: **0.1.31**
+Current version: **0.1.32**
 
 ## Share / install
 
@@ -35,7 +35,7 @@ After a code update, click **Reload** on the extension card (required on Edge/Ch
 
 - **Duration** — how long keep-alive runs for saved hosts (1–24 hours)
 - **Auto-enable** — turn on when you open a matching **saved** Panorama/SCM tab (host permission must already be allowed)
-- **Add this session** — session-only keep-alive for the active tab (not saved under Hosts; cleared when the browser closes)
+- **Add this session** — session-only keep-alive for the active tab (not saved under Hosts; ends when you close that tab or the browser)
 - **Add this tab to hosts** — save the active tab under Hosts and enable keep-alive for **Duration**
 - **Hosts…** — edit the permanent host list (survives browser restart; Active still clears on close)
 
@@ -43,7 +43,7 @@ After a code update, click **Reload** on the extension card (required on Edge/Ch
 
 - **Saved hosts:** background `GET` of the UI (`/` and `/php/`), or in-tab refresh when a tab is open
 - **SCM:** pokes an SCM tab (opens one in the background if needed)
-- **Add this session:** keep-alive runs inside the open UI tab; not written to Hosts
+- **Add this session:** keep-alive runs only in the open UI tab — it will **not** reopen a tab you closed
 - First refresh fires within ~1 minute (not after a full interval) so a 5‑minute Idle Timeout is not lost to the first alarm
 - Use a refresh interval **shorter** than the device Idle Timeout
 - Closing the browser clears Active checks and sessions; permanent hosts/aliases/intervals stay
